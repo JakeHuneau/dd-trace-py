@@ -39,6 +39,7 @@ suites:
       - '@bootstrap'
       - '@appsec_iast'
       - '@remoteconfig'
+      - ddtrace/contrib/_events/web_request.py
       - tests/appsec/iast/*
     retry: 2
     snapshot: true
@@ -368,6 +369,7 @@ suites:
     paths:
       - '@bootstrap'
       - '@appsec'
+      - ddtrace/contrib/_events/web_request.py
       - tests/appsec/integrations/fastapi_tests/*
       - tests/appsec/integrations/conftest.py
       - tests/appsec/integrations/utils_testagent.py
