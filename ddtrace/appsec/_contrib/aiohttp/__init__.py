@@ -1,5 +1,6 @@
 from collections.abc import Awaitable
 from collections.abc import Mapping
+import contextlib
 import json
 import re
 from typing import Any
@@ -18,6 +19,7 @@ from ddtrace.appsec._asm_request_context import set_blocked
 from ddtrace.appsec._asm_request_context import set_body_response
 from ddtrace.appsec._asm_request_context import set_waf_address
 from ddtrace.appsec._constants import SPAN_DATA_NAMES
+from ddtrace.appsec._ddwaf.ddwaf_types import DDWAF_MAX_STRING_LENGTH
 from ddtrace.appsec._utils import Block_config
 from ddtrace.contrib.internal import trace_utils
 from ddtrace.internal import core
@@ -121,11 +123,19 @@ def _multipart_parser() -> Optional[Callable[[Any, bytes], Awaitable[dict[str, A
     try:
         from ddtrace.appsec._contrib.aiohttp._multipart import multipart_fields
     except Exception:
-        if not _multipart_import_failed:
-            _multipart_import_failed = True
-            logger.warning("aiohttp::multipart body inspection unavailable", exc_info=True)
+        _multipart_import_failed = True
+        logger.warning("aiohttp::multipart body inspection unavailable", exc_info=True)
         return None
     return multipart_fields
+
+
+def _parse_json_body(raw_body: bytes, charset: str) -> Any:
+    with contextlib.suppress(Exception):
+        return json.loads(raw_body if is_utf8_charset(charset) else raw_body.decode(charset))
+    if not is_utf8_charset(charset):
+        with contextlib.suppress(Exception):
+            return json.loads(raw_body)
+    return raw_body.decode(charset, errors="replace")[: DDWAF_MAX_STRING_LENGTH + 1]
 
 
 def _check_blocked() -> None:
@@ -181,15 +191,12 @@ async def _analyze_body(request: Any, media_type: MediaType) -> Optional[bytes]:
         logger.debug("aiohttp::failed to read request body", exc_info=True)
         return None
     body: Any = None
-    charset = inspectable_charset(request.charset)
     try:
+        charset = inspectable_charset(request.charset, len(raw_body))
         with iast_disabled_taint_sources():
             if media_type is MediaType.JSON:
                 if raw_body:
-                    try:
-                        body = json.loads(raw_body.decode(charset))
-                    except Exception:
-                        body = json.loads(raw_body)
+                    body = _parse_json_body(raw_body, charset)
             elif media_type is MediaType.XML:
                 body = xmltodict.parse(raw_body)
             elif media_type is MediaType.FORM_URLENCODED:

@@ -1,3 +1,4 @@
+import codecs
 from collections.abc import Generator  # noqa:F401
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -57,15 +58,22 @@ def is_utf8_charset(charset: str) -> bool:
 _SLOW_CHARSETS = frozenset(("punycode", "idna"))
 
 
-def inspectable_charset(charset: Optional[str]) -> str:
-    """Return the codec name to decode a body with, or utf-8 when it is unknown or has a slow decoder."""
-    import codecs
+_SLOW_CHARSET_MAX_SIZE = 4096
 
-    try:
-        name = codecs.lookup(charset or "utf-8").name
-    except LookupError:
+
+def inspectable_charset(charset: Any, size: int = 0) -> str:
+    """Return the text codec to decode a body of size bytes with, or utf-8 when it is unusable or too slow."""
+    if not isinstance(charset, str) or not charset:
         return "utf-8"
-    return "utf-8" if name in _SLOW_CHARSETS else name
+    try:
+        info = codecs.lookup(charset)
+    except Exception:
+        return "utf-8"
+    if not getattr(info, "_is_text_encoding", True):
+        return "utf-8"
+    if info.name in _SLOW_CHARSETS and size > _SLOW_CHARSET_MAX_SIZE:
+        return "utf-8"
+    return info.name
 
 
 def classify_media_type(content_type: Optional[str]) -> MediaType:

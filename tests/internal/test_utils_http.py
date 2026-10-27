@@ -5,6 +5,7 @@ import pytest
 from ddtrace.internal.http import HTTPResponse
 from ddtrace.internal.http import NativeHTTPConnection
 from ddtrace.internal.utils.http import connector
+from ddtrace.internal.utils.http import inspectable_charset
 from ddtrace.internal.utils.http import parse_form_multipart
 
 
@@ -47,3 +48,23 @@ def test_parse_form_multipart_handles_charset_suffix() -> None:
     # not collapsed to empty strings.
     assert parsed["meta"] == {"id": 42}
     assert parsed["raw"] == {"id": 99}
+
+
+@pytest.mark.parametrize(
+    ("charset", "size", "expected"),
+    [
+        ("Latin-1", 0, "iso8859-1"),
+        ("UTF-7", 0, "utf-7"),
+        (None, 0, "utf-8"),
+        ("", 0, "utf-8"),
+        ("unknown-charset", 0, "utf-8"),
+        ("\udcff", 0, "utf-8"),
+        (("utf-8", "", "utf-8"), 0, "utf-8"),
+        ("hex", 0, "utf-8"),
+        ("zlib", 0, "utf-8"),
+        ("punycode", 100, "punycode"),
+        ("punycode", 100_000, "utf-8"),
+    ],
+)
+def test_inspectable_charset(charset, size, expected) -> None:
+    assert inspectable_charset(charset, size) == expected

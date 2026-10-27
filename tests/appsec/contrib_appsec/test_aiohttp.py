@@ -262,6 +262,15 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
                 },
                 "POST",
             ),
+            (
+                {
+                    "u": ("\r\nContent-Type: application/x-www-form-urlencoded; charset=hex", b"x=1"),
+                    "f": _ATTACK.encode(),
+                },
+                "POST",
+            ),
+            ({"c": ("\r\nContent-Type: text/plain; charset=\xff", b"x"), "f": _ATTACK.encode()}, "POST"),
+            ({"f": ("\r\nContent-Type: text/plain; charset=hz", b"~\n" * 30000 + _ATTACK.encode())}, "POST"),
         ],
         ids=[
             "base64",
@@ -286,6 +295,9 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             "padded_urlencoded_part",
             "large_json_part_declared_utf7",
             "urlencoded_part_declared_utf7",
+            "after_bytes_codec_charset",
+            "after_undecodable_charset_name",
+            "after_zero_width_escapes",
         ],
     )
     def test_multipart_parts_decoded_as_aiohttp(self, interface, entry_span, get_entry_span_tag, fields, method):
@@ -400,6 +412,22 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
         with override_global_config(dict(_asm_enabled=True, _asm_static_rule_file=rules.RULES_SRB)):
             self.update_tracer(interface)
             response = interface.client.post("/asm/", data=body, content_type=f"application/json; charset={charset}")
+            self.assert_blocked(response, entry_span, get_entry_span_tag, "tst-037-003")
+
+    @pytest.mark.parametrize(
+        ("content_type", "encode"),
+        [
+            ("application/json; charset=punycode", lambda text: text.encode("punycode")),
+            ("application/json; charset*=utf-8''utf-8", lambda text: text.encode()),
+        ],
+        ids=["punycode", "rfc2231_charset"],
+    )
+    def test_json_body_unusual_charset(self, interface, entry_span, get_entry_span_tag, content_type, encode):
+        with override_global_config(dict(_asm_enabled=True, _asm_static_rule_file=rules.RULES_SRB)):
+            self.update_tracer(interface)
+            response = interface.client.post(
+                "/asm/", data=encode(json.dumps({"a": _ATTACK})), content_type=content_type
+            )
             self.assert_blocked(response, entry_span, get_entry_span_tag, "tst-037-003")
 
     def test_multipart_slow_charset_across_parts_is_bounded(self, interface):

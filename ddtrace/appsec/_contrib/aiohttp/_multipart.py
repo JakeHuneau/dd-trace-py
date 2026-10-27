@@ -32,8 +32,8 @@ _MAX_DEPTH = DDWAF_MAX_CONTAINER_DEPTH
 _MAX_PART_DECOMPRESSED = 16 * 1024
 _MAX_TOTAL_DECOMPRESSED = 4 * 1024 * 1024
 _DEFAULT_MAX_PARTS = 1000
+# One character past the WAF limit, so the WAF still reports the value as truncated.
 _MAX_STORED_LENGTH = DDWAF_MAX_STRING_LENGTH + 1
-_MAX_DECODED_PREFIX = 8 * _MAX_STORED_LENGTH
 _YIELD_EVERY = 25
 
 
@@ -73,7 +73,12 @@ async def _read_fields(reader: MultipartReader, walk: _Walk, depth: int) -> dict
             continue
         data = await _read_part(part, walk, collect=not filename)
         if not filename:
-            fields.setdefault(name, []).extend(_decode(part, data, walk))
+            try:
+                values = _decode(part, data, walk)
+            except Exception:
+                logger.debug("aiohttp::multipart part decoding failed", exc_info=True)
+                values = [_decode_text(data, "utf-8")]
+            fields.setdefault(name, []).extend(values)
     return {key: values[0] if len(values) == 1 else values for key, values in fields.items()}
 
 
@@ -82,6 +87,7 @@ async def _next_part(reader: MultipartReader, walk: _Walk) -> Optional[Union[Mul
         part = await reader.next()
     except Exception:
         logger.debug("aiohttp::multipart walk stopped", exc_info=True)
+        # Stop everything: the parent's next() would otherwise run aiohttp's unguarded release().
         walk.exhausted = True
         return None
     if part is None:
@@ -113,6 +119,7 @@ async def _read_part(part: BodyPartReader, walk: _Walk, collect: bool) -> bytear
     try:
         while not part.at_eof():
             chunk = await part.read_chunk()
+            # An empty chunk before the part ends means the stream ran out (CVE-2024-30251 loops here).
             if not chunk and not part.at_eof():
                 walk.exhausted = True
                 break
@@ -155,7 +162,7 @@ def _decode(part: BodyPartReader, raw: bytearray, walk: _Walk) -> list[Any]:
         logger.debug("aiohttp::multipart content decoding failed", exc_info=True)
     declared_charset = part.get_charset(default="")
     if declared_charset:
-        declared_charset = inspectable_charset(declared_charset)
+        declared_charset = inspectable_charset(declared_charset, len(data))
     is_text = content_type is None or content_type.startswith("text/")
     charset = (declared_charset or "utf-8") if is_text else "utf-8"
     values = [_value(data, charset, media_type)]
@@ -172,25 +179,28 @@ def _value(data: Union[bytes, bytearray], charset: str, media_type: MediaType) -
         try:
             return json.loads(data if is_utf8_charset(charset) else data.decode(charset))
         except Exception:
-            try:
-                return json.loads(data)
-            except Exception:
-                logger.debug("aiohttp::multipart JSON parsing failed", exc_info=True)
+            if not is_utf8_charset(charset):
+                try:
+                    return json.loads(data)
+                except Exception:
+                    logger.debug("aiohttp::multipart JSON parsing failed", exc_info=True)
     if media_type is MediaType.FORM_URLENCODED:
-        form: dict[str, list[str]] = {}
-        text = data.decode(charset, errors="replace").rstrip()
-        for key, value in parse_qsl(text, keep_blank_values=True, encoding=charset):
-            form.setdefault(key, []).append(value)
-        return {key: values[0] if len(values) == 1 else values for key, values in form.items()}
+        try:
+            form: dict[str, list[str]] = {}
+            text = data.decode(charset, errors="replace").rstrip()
+            for key, value in parse_qsl(text, keep_blank_values=True, encoding=charset):
+                form.setdefault(key, []).append(value)
+            return {key: values[0] if len(values) == 1 else values for key, values in form.items()}
+        except Exception:
+            logger.debug("aiohttp::multipart urlencoded parsing failed", exc_info=True)
     return _decode_text(data, charset)
 
 
 def _decode_text(data: Union[bytes, bytearray], charset: str) -> str:
-    prefix = data[:_MAX_DECODED_PREFIX]
     try:
-        text = prefix.decode(charset, errors="replace")
+        text = data.decode(charset, errors="replace")
     except Exception:
-        text = prefix.decode("utf-8", errors="replace")
+        text = data.decode("utf-8", errors="replace")
     return text[:_MAX_STORED_LENGTH]
 
 
