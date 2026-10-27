@@ -136,10 +136,10 @@ def test_as_formatted_evidence_convert_escaped_text_to_tainted_text() -> None:
     s = "abcdefgh"
     ranges = _build_sample_range(0, 5, "2")
     set_ranges(s, (ranges,), context_id)
-    assert (
-        as_formatted_evidence(s, tag_mapping_function=TagMappingMode.Mapper) == ":+-<1750328947>abcde<1750328947>-+:fgh"
-    )
-    assert _convert_escaped_text_to_tainted_text(":+-<1750328947>abcde<1750328947>-+:fgh", [ranges]) == "abcdefgh"
+    # Native hashes differ between C++ standard libraries; the marker must identify this range.
+    escaped = f":+-<{ranges.get_hash()}>abcde<{ranges.get_hash()}>-+:fgh"
+    assert as_formatted_evidence(s, tag_mapping_function=TagMappingMode.Mapper) == escaped
+    assert _convert_escaped_text_to_tainted_text(escaped, [ranges]) == "abcdefgh"
 
 
 @pytest.mark.parametrize("literal_marker", ["a:+-b", "a-+:b", "a:+-b-+:c"])

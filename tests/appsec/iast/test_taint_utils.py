@@ -1,3 +1,4 @@
+import builtins
 import sys
 
 import pytest
@@ -493,3 +494,31 @@ def test_taint_structure_undecodable_source_value(iast_context_defaults, monkeyp
         assert ranges[0].source.origin == OriginType.PARAMETER
         assert ranges[0].source.name == name
         assert not ranges[0].has_secure_mark(VulnerabilityType.UNVALIDATED_REDIRECT)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 15), reason="Requires Python 3.15 frozendict")
+@pytest.mark.parametrize("nested", [False, True])
+def test_frozendict_source_tainting_preserves_type_and_immutability(iast_context_defaults, nested):
+    frozendict = getattr(builtins, "frozendict")
+    key = "".join(("request", "_parameter"))
+    value = "".join(("frozen", "_input"))
+    inner = frozendict({key: value})
+    original = frozendict({"nested": inner}) if nested else inner
+
+    result = taint_utils.taint_structure(original, OriginType.PARAMETER_NAME, OriginType.PARAMETER)
+
+    assert type(result) is frozendict
+    assert result == original
+    with pytest.raises(TypeError):
+        result[key] = "changed"
+    result_inner = result["nested"] if nested else result
+    assert type(result_inner) is frozendict
+    result_key = next(iter(result_inner))
+    assert is_pyobject_tainted(result_key)
+    assert get_tainted_ranges(result_key)[0].source.origin == OriginType.PARAMETER_NAME
+    ranges = get_tainted_ranges(result_inner[key])
+    assert len(ranges) == 1
+    assert (ranges[0].start, ranges[0].length) == (0, len(value))
+    assert ranges[0].source.origin == OriginType.PARAMETER
+    assert not is_pyobject_tainted(key)
+    assert not is_pyobject_tainted(value)

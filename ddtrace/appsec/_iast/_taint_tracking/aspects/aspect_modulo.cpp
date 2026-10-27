@@ -70,8 +70,33 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
             return return_candidate_result();
         }
 
-        const py::tuple parameters =
-          py::isinstance<py::tuple>(py_candidate_tuple) ? py_candidate_tuple : py::make_tuple(py_candidate_tuple);
+        bool mapping_parameters = PyDict_CheckExact(candidate_tuple);
+#if PY_VERSION_HEX >= 0x030F0000
+        mapping_parameters = mapping_parameters || PyFrozenDict_CheckExact(candidate_tuple);
+#endif
+        py::object mapping_items;
+        py::tuple parameters;
+        if (mapping_parameters) {
+            // Snapshot strong references before formatting can allocate or call Python.
+            mapping_items = py::reinterpret_steal<py::list>(PyDict_Items(candidate_tuple));
+            if (!mapping_items) {
+                throw py::error_already_set();
+            }
+            py::list values;
+            for (const auto item : mapping_items) {
+                const auto pair = py::reinterpret_borrow<py::tuple>(item);
+                const auto key = pair[0];
+                // Rebuilding the evidence mapping must not call user-defined key hashing.
+                if (!PyUnicode_CheckExact(key.ptr()) && !PyBytes_CheckExact(key.ptr())) {
+                    return return_candidate_result();
+                }
+                values.append(pair[1]);
+            }
+            parameters = py::tuple(values);
+        } else {
+            parameters =
+              py::isinstance<py::tuple>(py_candidate_tuple) ? py_candidate_tuple : py::make_tuple(py_candidate_tuple);
+        }
 
         auto [ranges_orig, candidate_text_ranges] = are_all_text_all_ranges(candidate_text, parameters, tx_map);
 
@@ -90,10 +115,27 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
                   as_formatted_evidence(AnyTextObjectToString(param_handle), ranges, TagMappingMode::Mapper, nullopt);
                 list_formatted_parameters.append(StringToPyObject(n_parameter, py_str_type));
             } else {
+                // A second formatting pass must not invoke a mapping value's conversion hooks again.
+                if (mapping_parameters && !PyLong_CheckExact(param_handle.ptr()) &&
+                    !PyFloat_CheckExact(param_handle.ptr()) && !PyBool_Check(param_handle.ptr()) &&
+                    param_handle.ptr() != Py_None) {
+                    return return_candidate_result();
+                }
                 list_formatted_parameters.append(param_handle);
             }
         }
-        py::tuple formatted_parameters(list_formatted_parameters);
+        py::object formatted_parameters;
+        if (mapping_parameters) {
+            py::dict formatted_mapping;
+            Py_ssize_t index = 0;
+            for (const auto item : mapping_items) {
+                const auto pair = py::reinterpret_borrow<py::tuple>(item);
+                formatted_mapping[pair[0]] = list_formatted_parameters[index++];
+            }
+            formatted_parameters = std::move(formatted_mapping);
+        } else {
+            formatted_parameters = py::tuple(list_formatted_parameters);
+        }
 
         py::object applied_params = py::reinterpret_steal<py::object>(
           do_modulo(StringToPyObject(fmttext, py_str_type).ptr(), formatted_parameters.ptr()));
@@ -105,6 +147,11 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
         if (res_pyobject == nullptr) {
             return return_candidate_result();
         }
-        return res_pyobject;
+        auto result = py::reinterpret_steal<py::object>(res_pyobject);
+        // Width or precision can truncate evidence markers. Preserve Python's result in that case.
+        if (mapping_parameters && !result.equal(py::handle(candidate_result))) {
+            return return_candidate_result();
+        }
+        return result.release().ptr();
     });
 }

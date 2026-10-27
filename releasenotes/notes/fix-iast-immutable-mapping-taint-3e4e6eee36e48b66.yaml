@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    Code Security (IAST): Fixes lost taint when substituting dictionary values into
+    strings with named percent-format placeholders and when handling Python 3.15
+    ``frozendict`` request data.

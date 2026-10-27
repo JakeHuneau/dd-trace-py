@@ -1,5 +1,7 @@
+import builtins
 import math
 import re
+import sys
 from typing import Any
 
 from hypothesis import given
@@ -383,15 +385,11 @@ class TestModuloAspectEdgeCases:
         result = mod.do_modulo(template, params)
         assert result == "Hello, World!"
 
-        # Note: Currently, taint propagation is not fully supported for named parameters in modulo operations.
-        # The taint ranges are not preserved when using named placeholders in the format string.
-        # This is a known limitation that may be addressed in future updates.
+        # Note: Named placeholders preserve the taint of each substituted value.
         ranges = get_tainted_ranges(result)
-        assert len(ranges) == 0
-        # The following assertions are commented out as they would fail until named parameter taint propagation
-        # is implemented
-        # assert ranges[0].source.name == "input1"
-        # assert ranges[1].source.name == "input2"
+        assert [(r.start, r.length) for r in ranges] == [(0, 5), (7, 5)]
+        assert ranges[0].source.name == "input1"
+        assert ranges[1].source.name == "input2"
 
     def test_modulo_with_tainted_lone_surrogate_parameter(self) -> None:
         # A lone surrogate cannot be encoded to UTF-8, so the native string conversion throws.
@@ -445,3 +443,75 @@ def test_psycopg_queries_dump_bytearray(is_tainted, string_data):
 
         with pytest.raises(TypeError):
             mod.psycopg_queries_dump_bytearray((1,))
+
+
+@pytest.mark.parametrize(
+    "mapping_type",
+    [
+        "dict",
+        pytest.param(
+            "frozendict", marks=pytest.mark.skipif(sys.version_info < (3, 15), reason="Requires Python 3.15 frozendict")
+        ),
+    ],
+)
+@pytest.mark.parametrize("text_type", [str, bytes, bytearray])
+def test_mapping_formatting_preserves_taint(iast_context_defaults, mapping_type, text_type):
+    original = "frozen_input" if text_type is str else text_type(b"frozen_input")
+    template = "prefix:%(value)s:suffix" if text_type is str else text_type(b"prefix:%(value)s:suffix")
+    key = "value" if text_type is str else b"value"
+    value = taint_pyobject(original, "parameter", "frozen_input", OriginType.PARAMETER)
+    mapping = getattr(builtins, mapping_type)({key: value})
+
+    result = mod.do_modulo(template, mapping)
+
+    assert type(result) is text_type
+    assert result == template % mapping
+    ranges = get_tainted_ranges(result)
+    assert len(ranges) == 1
+    assert (ranges[0].start, ranges[0].length) == (len("prefix:"), len(value))
+    assert ranges[0].source == get_tainted_ranges(value)[0].source
+
+
+@pytest.mark.parametrize("text_type", [str, bytes, bytearray])
+def test_mapping_formatting_repeated_value_and_numeric_field(text_type):
+    original = "tainted" if text_type is str else text_type(b"tainted")
+    template = "%(value)s/%(number)d/%(value)s" if text_type is str else text_type(b"%(value)s/%(number)d/%(value)s")
+    value_key = "value" if text_type is str else b"value"
+    number_key = "number" if text_type is str else b"number"
+    value = taint_pyobject(original, "parameter", "tainted", OriginType.PARAMETER)
+    mapping = {value_key: value, number_key: 42}
+
+    result = mod.do_modulo(template, mapping)
+
+    assert result == template % mapping
+    ranges = get_tainted_ranges(result)
+    assert [(r.start, r.length) for r in ranges] == [(0, len(value)), (len(value) + 4, len(value))]
+    assert all(r.source == get_tainted_ranges(value)[0].source for r in ranges)
+
+
+def test_mapping_formatting_unused_tainted_value_does_not_taint_result():
+    value = taint_pyobject("unused", "parameter", "unused", OriginType.PARAMETER)
+    result = mod.do_modulo("%(plain)s", {"plain": "clean", "unused": value})
+    assert result == "clean"
+    assert not get_tainted_ranges(result)
+
+
+@pytest.mark.parametrize("template", ["%(value).3s", "%(value)20s"])
+def test_mapping_formatting_preserves_precision_and_width(template):
+    value = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
+    mapping = {"value": value}
+    assert mod.do_modulo(template, mapping) == template % mapping
+
+
+def test_mapping_formatting_does_not_repeat_user_conversion():
+    class Value:
+        calls = 0
+
+        def __str__(self):
+            self.calls += 1
+            return str(self.calls)
+
+    value = Value()
+    tainted = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
+    assert mod.do_modulo("%(tainted)s/%(object)s", {"tainted": tainted, "object": value}) == "tainted/1"
+    assert value.calls == 1
