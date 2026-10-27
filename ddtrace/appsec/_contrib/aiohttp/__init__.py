@@ -1,7 +1,9 @@
+from collections.abc import Awaitable
 from collections.abc import Mapping
 import json
 import re
 from typing import Any
+from typing import Callable
 from typing import Optional
 from typing import Union
 from urllib.parse import parse_qsl
@@ -26,7 +28,8 @@ from ddtrace.internal.span_bus import span_from_context
 from ddtrace.internal.utils.http import MediaType
 from ddtrace.internal.utils.http import _get_blocked_template
 from ddtrace.internal.utils.http import classify_media_type
-from ddtrace.internal.utils.http import parse_form_multipart
+from ddtrace.internal.utils.http import inspectable_charset
+from ddtrace.internal.utils.http import is_utf8_charset
 import ddtrace.vendor.xmltodict as xmltodict
 
 
@@ -101,7 +104,28 @@ def _parse_cookies(headers: Any) -> dict[str, Union[str, list[str]]]:
         key, value = key.strip(), value.strip()
         if key or value:
             cookies.setdefault(key, []).append(_unquote_cookie(value))
-    return {key: values[0] if len(values) == 1 else values for key, values in cookies.items()}
+    return _single_or_list(cookies)
+
+
+def _single_or_list(fields: dict[str, list[str]]) -> dict[str, Union[str, list[str]]]:
+    return {key: values[0] if len(values) == 1 else values for key, values in fields.items()}
+
+
+_multipart_import_failed = False
+
+
+def _multipart_parser() -> Optional[Callable[[Any, bytes], Awaitable[dict[str, Any]]]]:
+    global _multipart_import_failed
+    if _multipart_import_failed:
+        return None
+    try:
+        from ddtrace.appsec._contrib.aiohttp._multipart import multipart_fields
+    except Exception:
+        if not _multipart_import_failed:
+            _multipart_import_failed = True
+            logger.warning("aiohttp::multipart body inspection unavailable", exc_info=True)
+        return None
+    return multipart_fields
 
 
 def _check_blocked() -> None:
@@ -157,22 +181,41 @@ async def _analyze_body(request: Any, media_type: MediaType) -> Optional[bytes]:
         logger.debug("aiohttp::failed to read request body", exc_info=True)
         return None
     body: Any = None
-    charset = request.charset or "utf-8"
+    charset = inspectable_charset(request.charset)
     try:
         with iast_disabled_taint_sources():
             if media_type is MediaType.JSON:
-                body = json.loads(raw_body.decode(charset)) if raw_body else None
+                if raw_body:
+                    try:
+                        body = json.loads(raw_body.decode(charset))
+                    except Exception:
+                        body = json.loads(raw_body)
             elif media_type is MediaType.XML:
                 body = xmltodict.parse(raw_body)
+            elif media_type is MediaType.FORM_URLENCODED:
+                form: dict[str, list[str]] = {}
+                utf8_text = raw_body.decode("utf-8", errors="replace").rstrip()
+                try:
+                    text_body = (
+                        utf8_text if is_utf8_charset(charset) else raw_body.decode(charset, errors="replace").rstrip()
+                    )
+                    pairs = parse_qsl(text_body, keep_blank_values=True, encoding=charset)
+                except Exception:
+                    text_body = utf8_text
+                    pairs = parse_qsl(text_body, keep_blank_values=True)
+                for key, value in pairs:
+                    form.setdefault(key, []).append(value)
+                if text_body != utf8_text:
+                    seen = {key: set(values) for key, values in form.items()}
+                    for key, value in parse_qsl(utf8_text, keep_blank_values=True):
+                        if value not in seen.setdefault(key, set()):
+                            seen[key].add(value)
+                            form.setdefault(key, []).append(value)
+                body = _single_or_list(form)
             else:
-                text_body = raw_body.decode(charset, errors="replace")
-                if media_type is MediaType.FORM_URLENCODED:
-                    form: dict[str, list[str]] = {}
-                    for key, value in parse_qsl(text_body.rstrip(), keep_blank_values=True, encoding=charset):
-                        form.setdefault(key, []).append(value)
-                    body = {key: values[0] if len(values) == 1 else values for key, values in form.items()}
-                else:
-                    body = parse_form_multipart(text_body, request.headers)
+                multipart_fields = _multipart_parser()
+                if multipart_fields is not None:
+                    body = await multipart_fields(request, raw_body)
     except Exception:
         logger.debug("aiohttp::failed to parse request body", exc_info=True)
         return raw_body

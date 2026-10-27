@@ -49,6 +49,25 @@ class MediaType(Enum):
     UNKNOWN = "unknown"
 
 
+def is_utf8_charset(charset: str) -> bool:
+    """Whether a charset name designates UTF-8."""
+    return charset.lower().replace("-", "").replace("_", "") == "utf8"
+
+
+_SLOW_CHARSETS = frozenset(("punycode", "idna"))
+
+
+def inspectable_charset(charset: Optional[str]) -> str:
+    """Return the codec name to decode a body with, or utf-8 when it is unknown or has a slow decoder."""
+    import codecs
+
+    try:
+        name = codecs.lookup(charset or "utf-8").name
+    except LookupError:
+        return "utf-8"
+    return "utf-8" if name in _SLOW_CHARSETS else name
+
+
 def classify_media_type(content_type: Optional[str]) -> MediaType:
     """Classify a ``Content-Type`` value into a :class:`MediaType` body-parsing category.
 
