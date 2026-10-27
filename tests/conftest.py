@@ -31,6 +31,7 @@ from unittest import mock
 from urllib import parse
 import warnings
 
+from _pytest.compat import getfuncargnames
 import pytest
 
 import ddtrace
@@ -58,6 +59,9 @@ from ddtrace.internal.service import ServiceStatusError
 from ddtrace.internal.telemetry import TelemetryWriter
 from ddtrace.internal.utils.formats import parse_tags_str
 from tests import utils
+from tests.process import DDTRACE_RUN
+from tests.process import PythonProcess
+from tests.process import run_process
 from tests.utils import TracerSpanContainer
 from tests.utils import call_program
 from tests.utils import request_token
@@ -77,10 +81,6 @@ code_to_pyc = getattr(importlib._bootstrap_external, "_code_to_timestamp_pyc")
 DEFAULT_DDTRACE_SUBPROCESS_TEST_SERVICE_NAME = "ddtrace_subprocess_dir"
 ITR_UNSKIPPABLE_REASON = "datadog_itr_unskippable"
 ITR_UNSKIPPABLE_DDTRACE_MARKERS = ("subprocess", "snapshot")
-
-# Prefer the wrapper installed with the running interpreter: the first ddtrace-run found on PATH may
-# belong to another environment and import a ddtrace build that does not match sys.executable.
-DDTRACE_RUN: str = shutil.which("ddtrace-run", path=os.path.dirname(sys.executable)) or "ddtrace-run"
 
 # Stash keys for storing original test name and nodeid before Python version suffix is added
 # For pytest >= 7.1.0, use StashKey; for older versions, use attribute names
@@ -319,6 +319,11 @@ def ddtrace_run_python_code_in_subprocess(tmpdir):
     yield _run
 
 
+@pytest.fixture
+def python_process(tmp_path):
+    return PythonProcess(tmp_path / DEFAULT_DDTRACE_SUBPROCESS_TEST_SERVICE_NAME)
+
+
 @pytest.fixture(autouse=True)
 def snapshot(request):
     marks = [m for m in request.node.iter_markers(name="snapshot")]
@@ -397,7 +402,9 @@ class FunctionDefFinder(ast.NodeVisitor):
 
         t = ast.parse(path.read_text())
         self.visit(t)
-        t.body = self._body or []
+        if self._body is None:
+            raise ValueError(f"No synchronous subprocess scenario named {self.func_name} in {file}")
+        t.body = self._body
         return t
 
 
@@ -426,7 +433,7 @@ def run_function_from_file(item, params=None):
 
     args = [sys.executable]
 
-    timeout = marker.kwargs.get("timeout", None)
+    timeout = marker.kwargs.get("timeout", 60.0)
     check_logs = marker.kwargs.get("check_logs", True)
 
     # Add ddtrace-run prefix in ddtrace-run mode
@@ -439,6 +446,9 @@ def run_function_from_file(item, params=None):
 
     # Override environment variables for the subprocess
     env = os.environ.copy()
+    if isinstance(item, ClassSubprocessItem):
+        # Match the normal test environment without running the parent git-metadata fixture.
+        env.pop("DD_GIT_REPOSITORY_URL", None)
     pythonpath = os.getenv("PYTHONPATH", None)
     base_path = os.path.dirname(os.path.dirname(__file__))
     env["PYTHONPATH"] = os.pathsep.join((base_path, pythonpath)) if pythonpath is not None else base_path
@@ -466,14 +476,29 @@ def run_function_from_file(item, params=None):
 
     try:
         with NamedTemporaryFile(mode="wb", suffix=".pyc", dir=custom_temp_dir, delete=False) as fp:
+            if isinstance(item, ClassSubprocessItem):
+                scenario = ast.parse(
+                    f"from tests.process import run_class_method; run_class_method(*{item.method_spec!r})"
+                )
+            else:
+                scenario = FunctionDefFinder(func).find(file)
             # Keep test assertions active while imported application code retains its optimization level.
-            dump_code_to_file(compile(FunctionDefFinder(func).find(file), file, "exec", optimize=0), fp.file)
+            dump_code_to_file(compile(scenario, file, "exec", optimize=0), fp.file)
 
             # If running a module with -m, we change directory to the module's
             # folder and run the module directly.
             if run_module:
                 cwd, module = split(splitext(fp.name)[0])
                 args.append(module)
+            elif isinstance(item, ClassSubprocessItem):
+                cwd = None
+                args.extend(
+                    [
+                        "-c",
+                        "import importlib.machinery; "
+                        f"exec(importlib.machinery.SourcelessFileLoader('__main__', {fp.name!r}).get_code('__main__'))",
+                    ]
+                )
             else:
                 cwd = None
                 args.append(fp.name)
@@ -484,7 +509,15 @@ def run_function_from_file(item, params=None):
             def _subprocess_wrapper() -> None:
                 out: Union[bytes, str]
                 err: Union[bytes, str]
-                out, err, status, _ = call_program(*args, env=env, cwd=cwd, timeout=timeout)
+                out, err, status, _ = run_process(*args, env=env, cwd=cwd, timeout=timeout)
+
+                error_text = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else err
+                if status == 1 and (
+                    "unittest.case.SkipTest:" in error_text
+                    or "unittest.SkipTest:" in error_text
+                    or "_pytest.outcomes.Skipped:" in error_text
+                ):
+                    pytest.skip(error_text.splitlines()[-1])
 
                 xfailed = (
                     "_pytest.outcomes.XFailed" in err if isinstance(err, str) else b"_pytest.outcomes.XFailed" in err
@@ -526,6 +559,91 @@ def run_function_from_file(item, params=None):
             shutil.rmtree(temp_dir)
 
 
+class ClassSubprocessItem(pytest.Function):
+    """Keep reporting metadata in pytest and execute only the method's lifecycle in a child."""
+
+    def __init__(self, *args, original, params, **kwargs):
+        callobj = original.obj
+        if issubclass(original.cls, TestCase) and getattr(callobj, "__self__", None) is None:
+            callobj = getattr(original.cls(original.originalname), original.originalname)
+        super().__init__(*args, callobj=callobj, originalname=original.originalname, **kwargs)
+        self.method_spec = (self.cls.__module__, self.cls.__qualname__, self.originalname)
+        self.params = params
+        if hasattr(original, "callspec"):
+            self.callspec = original.callspec
+        self._location = original.reportinfo()
+        self.own_markers.extend(original.iter_markers())
+        self.keywords.update(original.keywords)
+        self.keywords[self.cls.__name__] = True
+        self.extra_keyword_matches.update(original.listextrakeywords())
+        self.extra_keyword_matches.add(self.cls.__name__)
+        if getattr(self.obj, "__unittest_expecting_failure__", False):
+            self.add_marker(pytest.mark.xfail(strict=True))
+
+    def reportinfo(self):
+        return self._location
+
+    def setup(self):
+        # Request only explicit dependencies, without Function.setup's autouse fixture setup.
+        fixtures = dict.fromkeys(name for mark in self.iter_markers("usefixtures") for name in mark.args)
+        for name in fixtures:
+            self._request.getfixturevalue(name)
+        marker = self.get_closest_marker("snapshot")
+        if marker is not None and os.getenv("DD_SNAPSHOT_ENABLED", "1") == "1":
+            kwargs = dict(marker.kwargs)
+            token = kwargs.pop("token", None) or request_token(self).replace(" ", "_").replace(os.path.sep, "_")
+            manager = _snapshot_context(token, *marker.args, **kwargs)
+            manager.__enter__()
+
+            def finish():
+                if hasattr(self, "rep_call") and not self.rep_call.skipped:
+                    manager.__exit__(None, None, None)
+
+            self.addfinalizer(finish)
+
+    def runtest(self):
+        run_function_from_file(self, params=self.params)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collectstart(collector):
+    if not isinstance(collector, pytest.Class):
+        return
+    original_collect = collector.collect
+
+    def collect():
+        for item in original_collect():
+            if not isinstance(item, pytest.Function):
+                yield item
+                continue
+            marker = item.get_closest_marker("subprocess")
+            if marker is None:
+                yield item
+                continue
+            if getfuncargnames(getattr(item.cls, item.originalname), cls=item.cls):
+                raise collector.CollectError(
+                    f"{item.nodeid}: subprocess methods cannot receive parent fixtures; "
+                    "create child state in setup or use an explicit python_process test"
+                )
+            if hasattr(item, "callspec"):
+                names = marker.kwargs.get("parametrize", {})
+                variants = [{name: item.callspec.params[name] for name in names}]
+            else:
+                variants = unwind_params(marker.kwargs.get("parametrize"))
+            for params in variants:
+                suffix = ""
+                if params and not hasattr(item, "callspec"):
+                    suffix = "[" + "-".join(str(value) for value in params.values()) + "]"
+                yield ClassSubprocessItem.from_parent(
+                    item.parent,
+                    name=item.name + suffix,
+                    original=item,
+                    params=params,
+                )
+
+    collector.collect = collect
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(session, config, items):
     """
@@ -537,7 +655,9 @@ def pytest_collection_modifyitems(session, config, items):
     """
     py_tag = f"py{sys.version_info.major}.{sys.version_info.minor}"
     for item in items:
-        if any(item.get_closest_marker(marker_name) for marker_name in ITR_UNSKIPPABLE_DDTRACE_MARKERS):
+        if any(
+            item.get_closest_marker(marker_name) for marker_name in ITR_UNSKIPPABLE_DDTRACE_MARKERS
+        ) or "python_process" in getattr(item, "fixturenames", ()):
             item.add_marker(pytest.mark.skipif(False, reason=ITR_UNSKIPPABLE_REASON))
 
         # Store original name and nodeid before modification

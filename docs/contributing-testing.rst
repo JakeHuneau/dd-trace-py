@@ -353,3 +353,29 @@ environment variables. For example, to enable debug logs just for
 ``ddtrace.debugging``, one can set ```_DD_DEBUGGING_LOG_LEVEL=DEBUG```. This
 will set the ``DEBUG`` log level for any logger whose name is prefixed with
 ``ddtrace.debugging``.
+
+Isolated Python tests
+---------------------
+
+Use ``@pytest.mark.subprocess`` for isolated test logic and ``python_process``
+for applications with parent-side assertions:
+
+.. code-block:: python
+
+    @pytest.mark.subprocess(env={"DD_SERVICE": "example"})
+    def test_startup():
+        from ddtrace import config
+
+        assert config.service == "example"
+
+    def test_application(python_process):
+        out, err, status, pid = python_process("print('ready')", ddtrace_run=True)
+        assert status == 0, err
+        assert out == b"ready\n"
+
+Module-level scenarios need their imports inside the body. Class methods run
+with their setup and cleanup hooks in the child; async methods are awaited.
+Parent fixtures run only when explicitly requested with ``usefixtures``.
+
+Marked tests expect exit status zero and empty stdout/stderr unless ``status``,
+``out``, or ``err`` says otherwise. Processes time out after 60 seconds by default.

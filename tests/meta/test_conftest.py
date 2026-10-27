@@ -88,6 +88,28 @@ class ConftestTestCase(TracerTestCase):
         rec = self.inline_run(file_name)
         rec.assertoutcome(passed=0, failed=0, skipped=1)
 
+    def test_process_fixture_is_unskippable(self):
+        py_file = self.testdir.makepyfile(
+            """
+            def test_selection(request, python_process):
+                reasons = [m.kwargs.get("reason") for m in request.node.iter_markers("skipif")]
+                assert "datadog_itr_unskippable" in reasons
+            """
+        )
+        self.inline_run(os.path.basename(py_file.strpath)).assertoutcome(passed=1)
+
+    def test_child_skip_is_reported(self):
+        py_file = self.testdir.makepyfile(
+            """
+            import pytest
+            @pytest.mark.subprocess()
+            def test_skip():
+                import unittest
+                raise unittest.SkipTest("child platform")
+            """
+        )
+        self.inline_run(os.path.basename(py_file.strpath)).assertoutcome(skipped=1)
+
 
 @pytest.mark.parametrize("optimization", ["0", "1", "2"])
 def test_subprocess_assertions_with_optimization(
@@ -121,3 +143,62 @@ def test_subprocess_assertions_with_optimization(
     result = pytester.runpytest_subprocess("--no-cov", "-o", "addopts=", "test_assertions.py", timeout=30)
     result.assert_outcomes(passed=1, failed=1)
     result.stdout.fnmatch_lines(["*subprocess assertion must execute*"])
+
+
+def test_class_subprocess(pytester, monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    pytester.makeconftest(
+        (root / "tests/conftest.py").read_text() + "\n@pytest.fixture(autouse=True)\ndef unrelated_fixture():\n"
+        "    raise AssertionError('isolated method loaded a parent fixture')\n"
+    )
+    pytester.makepyfile(
+        test_cases="""
+        import asyncio
+        import os
+        from pathlib import Path
+        import unittest
+        import pytest
+
+        MODE = os.getenv("CHILD_MODE", "parent")
+
+        class TestCase(unittest.TestCase):
+            def setUp(self):
+                assert MODE == "child"
+                assert os.getpid() != int(os.environ["PARENT_PID"])
+                self.value = 42
+                self.addCleanup(self.record, "cleanup")
+
+            def record(self, event):
+                with Path(os.environ["EVENTS"]).open("a") as stream:
+                    stream.write(self._testMethodName + ":" + event + "\\n")
+
+            def tearDown(self):
+                self.record("teardown")
+
+            @pytest.mark.subprocess(env={"CHILD_MODE": "child"}, parametrize={"CASE": ["one", "two"]})
+            async def test_async(self):
+                await asyncio.sleep(0)
+                assert self.value == 42
+                assert os.environ["CASE"] in ("one", "two")
+                self.record("awaited")
+
+            @pytest.mark.subprocess(env={"CHILD_MODE": "child", "PYTHONOPTIMIZE": "1"})
+            def test_failure(self):
+                assert False, "class assertion must execute"
+        """
+    )
+    monkeypatch.setenv("PARENT_PID", str(os.getpid()))
+    monkeypatch.setenv("EVENTS", str(pytester.path / "events"))
+    monkeypatch.setenv("DD_API_KEY", "foobar.baz")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(pytester.path), str(root), os.getenv("PYTHONPATH", "")]))
+    result = pytester.runpytest_subprocess("--no-cov", "-o", "addopts=", "-v", "test_cases.py", timeout=30)
+    result.assert_outcomes(passed=2, failed=1)
+    result.stdout.fnmatch_lines(["*class assertion must execute*"])
+    result.stdout.re_match_lines(
+        [r".*TestCase::test_async\[one\].*PASSED.*", r".*TestCase::test_async\[two\].*PASSED.*"]
+    )
+    events = (pytester.path / "events").read_text().splitlines()
+    assert events.count("test_async:awaited") == 2
+    assert events.count("test_async:teardown") == 2
+    assert events.count("test_async:cleanup") == 2
+    assert events[-2:] == ["test_failure:teardown", "test_failure:cleanup"]
