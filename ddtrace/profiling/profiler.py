@@ -1,3 +1,4 @@
+import atexit as stdlib_atexit
 from collections.abc import Mapping
 import json
 import logging
@@ -89,7 +90,13 @@ class Profiler:
                 != Profiler._exit_signal_handler
             )
 
-        atexit.register(self.stop)
+        if uwsgi.should_register_atexit():
+            atexit.register(self.stop)
+        else:
+            # With --skip-atexit, a uWSGI worker that exits through exit() (e.g. the first worker
+            # without --master) still finalizes the interpreter. Stop the sampling threads before
+            # that happens, but skip the final upload that --skip-atexit is meant to avoid.
+            stdlib_atexit.register(self.stop, flush=False)
 
         # register_on_exit_signal is needed for processes terminated via SIGTERM (e.g.
         # Ray workers, Kubernetes pods). Python atexit handlers do NOT run on SIGTERM by default,
