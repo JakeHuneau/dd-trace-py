@@ -60,7 +60,18 @@ def is_utf8_charset(charset: str) -> bool:
 
 _SLOW_CHARSETS = frozenset(("punycode", "idna"))
 _SLOW_CHARSET_MAX_SIZE = 4096
-_KNOWN_CHARSETS = frozenset(encodings.aliases.aliases) | frozenset(encodings.aliases.aliases.values()) | _SLOW_CHARSETS
+
+
+@cached()
+def _known_charsets() -> frozenset[str]:
+    import pkgutil
+
+    modules = frozenset(module.name for module in pkgutil.iter_modules(encodings.__path__))
+    return frozenset(encodings.aliases.aliases) | frozenset(encodings.aliases.aliases.values()) | modules
+
+
+def _normalized_charset(charset: str) -> str:
+    return encodings.normalize_encoding(charset).lower()
 
 
 def inspectable_charset(charset: Any, size: int = 0) -> str:
@@ -68,7 +79,9 @@ def inspectable_charset(charset: Any, size: int = 0) -> str:
     if not isinstance(charset, str) or not 0 < len(charset) <= 64:
         return "utf-8"
     # Only known names: codecs.lookup caches every unknown name forever.
-    if encodings.normalize_encoding(charset).lower() not in _KNOWN_CHARSETS:
+    normalized = _normalized_charset(charset)
+    known = _known_charsets()
+    if normalized not in known and normalized.replace(".", "_") not in known:
         return "utf-8"
     try:
         info = codecs.lookup(charset)
@@ -86,16 +99,22 @@ def is_slow_charset(charset: str) -> bool:
     return charset in _SLOW_CHARSETS
 
 
-def parse_json_bytes(data: Union[bytes, bytearray], charset: str) -> Any:
-    """Parse a JSON body as an application would, or raise ValueError."""
-    import json
+def is_punycode_charset(charset: Any) -> bool:
+    """Whether a declared charset value designates punycode."""
+    return isinstance(charset, str) and 0 < len(charset) <= 64 and _normalized_charset(charset) == "punycode"
 
+
+def parse_json_bytes(data: Union[bytes, bytearray], charset: str, punycode: bool = False) -> Any:
+    """Parse a JSON body with its charset, then from its bytes, or raise ValueError.
+
+    With punycode, also try the literal part that punycode keeps before its last hyphen.
+    """
     utf8 = is_utf8_charset(charset)
-    attempts: list[Callable[[], Any]] = [lambda: json.loads(data if utf8 else data.decode(charset))]
+    attempts: list[Callable[[], Any]] = [lambda: loads(data if utf8 else data.decode(charset))]
     if not utf8:
-        attempts.append(lambda: json.loads(data))
-    if b"-" in data:
-        attempts.append(lambda: json.loads(bytes(data).rpartition(b"-")[0]))
+        attempts.append(lambda: loads(data))
+    if punycode and b"-" in data:
+        attempts.append(lambda: loads(bytes(data).rpartition(b"-")[0]))
     for attempt in attempts:
         with suppress(Exception):
             return attempt()

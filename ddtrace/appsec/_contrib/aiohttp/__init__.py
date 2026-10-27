@@ -29,6 +29,7 @@ from ddtrace.internal.utils.http import MediaType
 from ddtrace.internal.utils.http import _get_blocked_template
 from ddtrace.internal.utils.http import classify_media_type
 from ddtrace.internal.utils.http import inspectable_charset
+from ddtrace.internal.utils.http import is_punycode_charset
 from ddtrace.internal.utils.http import is_utf8_charset
 from ddtrace.internal.utils.http import parse_json_bytes
 import ddtrace.vendor.xmltodict as xmltodict
@@ -128,16 +129,17 @@ def _multipart_parser() -> Optional[Callable[[Any, bytes], Awaitable[dict[str, A
     return multipart_fields
 
 
-def _parse_json_body(raw_body: bytes, charset: str) -> Any:
-    try:
-        return parse_json_bytes(raw_body, charset)
-    except ValueError:
-        pass
+def _parse_json_body(raw_body: bytes, charset: str, punycode: bool) -> Any:
     try:
         text = raw_body.decode(charset, errors="replace")
     except Exception:
         text = raw_body.decode("utf-8", errors="replace")
-    return text[: DDWAF_MAX_STRING_LENGTH + 1]
+    text = text[: DDWAF_MAX_STRING_LENGTH + 1]
+    try:
+        parsed = parse_json_bytes(raw_body, charset, punycode)
+    except ValueError:
+        return text
+    return [parsed, text] if punycode else parsed
 
 
 def _check_blocked() -> None:
@@ -198,7 +200,7 @@ async def _analyze_body(request: Any, media_type: MediaType) -> Optional[bytes]:
         with iast_disabled_taint_sources():
             if media_type is MediaType.JSON:
                 if raw_body:
-                    body = _parse_json_body(raw_body, charset)
+                    body = _parse_json_body(raw_body, charset, is_punycode_charset(request.charset))
             elif media_type is MediaType.XML:
                 body = xmltodict.parse(raw_body)
             elif media_type is MediaType.FORM_URLENCODED:

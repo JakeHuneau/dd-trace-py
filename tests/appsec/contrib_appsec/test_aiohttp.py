@@ -294,6 +294,17 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
                 },
                 "POST",
             ),
+            ({"f": ("\r\nContent-Type: text/plain; charset=utf.16be", _ATTACK.encode("utf-16-be"))}, "POST"),
+            ({"j": ("\r\nContent-Type: application/json", f'{{"k": "v"}}-{_ATTACK}'.encode())}, "POST"),
+            (
+                {
+                    "n": (
+                        "\r\nContent-Type: multipart/mixed; boundary=in",
+                        b"--in\r\nContent-Encoding: gzip\r\n\r\n" + gzip.compress(_ATTACK.encode()) + b"junk\r\n--in--",
+                    )
+                },
+                "POST",
+            ),
         ],
         ids=[
             "base64",
@@ -323,6 +334,9 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             "after_zero_width_escapes",
             "nested_two_member_gzip",
             "nested_compressed_zero_width_escapes",
+            "dotted_charset_name",
+            "json_part_with_trailing_text",
+            "nested_gzip_with_trailing_bytes",
         ],
     )
     def test_multipart_parts_decoded_as_aiohttp(self, interface, entry_span, get_entry_span_tag, fields, method):
@@ -445,8 +459,9 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             ("application/json; charset=punycode", lambda text: text.encode("punycode")),
             ("application/json; charset*=utf-8''utf-8", lambda text: text.encode()),
             ("application/json; charset=idna", lambda text: _ATTACK.encode()),
+            ("application/json", lambda text: f'{{"k": "v"}}-{_ATTACK}'.encode()),
         ],
-        ids=["punycode", "rfc2231_charset", "invalid_json_idna"],
+        ids=["punycode", "rfc2231_charset", "invalid_json_idna", "trailing_text"],
     )
     def test_json_body_unusual_charset(self, interface, entry_span, get_entry_span_tag, content_type, encode):
         with override_global_config(dict(_asm_enabled=True, _asm_static_rule_file=rules.RULES_SRB)):
@@ -462,6 +477,23 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             self.update_tracer(interface)
             response = interface.client.post("/asm/", data=body, content_type="application/json; charset=punycode")
             self.assert_blocked(response, entry_span, get_entry_span_tag, "tst-037-003")
+
+    def test_multipart_json_parsing_budget(self, interface):
+        nested_json = gzip.compress(b"[" + b"[]," * 5460 + b"[]]")
+        inner = b"".join(
+            b"--in\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n" + nested_json + b"\r\n"
+            for _ in range(200)
+        )
+        body, content_type = _multipart_body(
+            {"n": ("\r\nContent-Type: multipart/mixed; boundary=in", inner + b"--in--")}
+        )
+        with override_global_config(dict(_asm_enabled=True, _asm_static_rule_file=rules.RULES_SRB)):
+            self.update_tracer(interface)
+            response = interface.client.post("/stream_upload/", data=body, content_type=content_type)
+            assert self.status(response) == 200, self.body(response)
+            assert utils._addresses_store, "no waf addresses stored"
+            parts = utils._addresses_store[0]["http.request.body"]["n"][""]
+            assert sum(isinstance(value, list) for value in parts) < len(parts)
 
     def test_multipart_slow_charset_across_parts_is_bounded(self, interface):
         part = ("\r\nContent-Type: application/json; charset=punycode", b"a" * 64_000)

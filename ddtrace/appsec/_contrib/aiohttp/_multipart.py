@@ -22,6 +22,7 @@ from ddtrace.internal.logger import get_logger
 from ddtrace.internal.utils.http import MediaType
 from ddtrace.internal.utils.http import classify_media_type
 from ddtrace.internal.utils.http import inspectable_charset
+from ddtrace.internal.utils.http import is_punycode_charset
 from ddtrace.internal.utils.http import is_slow_charset
 from ddtrace.internal.utils.http import is_utf8_charset
 from ddtrace.internal.utils.http import parse_json_bytes
@@ -37,14 +38,25 @@ _DEFAULT_MAX_PARTS = 1000
 _MAX_STORED_LENGTH = DDWAF_MAX_STRING_LENGTH + 1
 _YIELD_EVERY = 25
 _MAX_SLOW_CHARSET_DECODED = 16 * 1024
+_NO_SLOW_CHARSET = 1 << 62
+_MAX_JSON_PARSED = 1024 * 1024
 
 
 class _Walk:
-    __slots__ = ("decompress_budget", "slow_charset_budget", "exhausted", "parts_left", "max_size", "seen")
+    __slots__ = (
+        "decompress_budget",
+        "slow_charset_budget",
+        "json_budget",
+        "exhausted",
+        "parts_left",
+        "max_size",
+        "seen",
+    )
 
     def __init__(self, max_fields: int, max_size: int) -> None:
         self.decompress_budget = _MAX_TOTAL_DECOMPRESSED
         self.slow_charset_budget = _MAX_SLOW_CHARSET_DECODED
+        self.json_budget = _MAX_JSON_PARSED
         self.exhausted = False
         self.parts_left = max_fields
         self.max_size = max_size
@@ -160,30 +172,34 @@ def _decode(part: BodyPartReader, raw: bytearray, walk: _Walk) -> list[Any]:
         logger.debug("aiohttp::multipart transfer decoding failed", exc_info=True)
     transfer_decoded = data
     try:
-        data = _content_decode(part, data, walk, media_type)
+        data = _content_decode(part, data, walk)
     except Exception:
         logger.debug("aiohttp::multipart content decoding failed", exc_info=True)
     declared_charset = part.get_charset(default="")
+    punycode = is_punycode_charset(declared_charset)
     if declared_charset:
-        size = len(data) if walk.slow_charset_budget >= len(data) else walk.max_size + 1
-        declared_charset = inspectable_charset(declared_charset, size)
+        within_budget = walk.slow_charset_budget >= len(data)
+        declared_charset = inspectable_charset(declared_charset, len(data) if within_budget else _NO_SLOW_CHARSET)
         if is_slow_charset(declared_charset):
             walk.slow_charset_budget -= len(data)
     is_text = content_type is None or content_type.startswith("text/")
     charset = (declared_charset or "utf-8") if is_text else "utf-8"
-    values = [_value(data, charset, media_type)]
+    values = [_value(data, charset, media_type, walk, punycode)]
     if not is_text and declared_charset and not is_utf8_charset(declared_charset):
-        values.append(_value(data, declared_charset, media_type))
+        values.append(_value(data, declared_charset, media_type, walk, punycode))
+    if punycode:
+        values.append(_decode_text(data, "utf-8"))
     decompressed = data is not transfer_decoded
     if transfer_decoded is not raw or (not decompressed and not is_utf8_charset(charset)):
         values.append(_decode_text(raw, "utf-8"))
     return [value for index, value in enumerate(values) if value not in values[:index]]
 
 
-def _value(data: Union[bytes, bytearray], charset: str, media_type: MediaType) -> Any:
-    if media_type is MediaType.JSON:
+def _value(data: Union[bytes, bytearray], charset: str, media_type: MediaType, walk: _Walk, punycode: bool) -> Any:
+    if media_type is MediaType.JSON and walk.json_budget >= len(data):
+        walk.json_budget -= len(data)
         try:
-            return parse_json_bytes(data, charset)
+            return parse_json_bytes(data, charset, punycode)
         except ValueError:
             logger.debug("aiohttp::multipart JSON parsing failed", exc_info=True)
     if media_type is MediaType.FORM_URLENCODED:
@@ -215,23 +231,25 @@ def _transfer_decode(part: BodyPartReader, data: Union[bytes, bytearray]) -> Uni
     return data
 
 
-def _content_decode(
-    part: BodyPartReader, data: Union[bytes, bytearray], walk: _Walk, media_type: MediaType
-) -> Union[bytes, bytearray]:
+def _content_decode(part: BodyPartReader, data: Union[bytes, bytearray], walk: _Walk) -> Union[bytes, bytearray]:
     content_encoding = part.headers.get(hdrs.CONTENT_ENCODING, "").lower()
     if content_encoding not in ("deflate", "gzip") or not _aiohttp_decodes(part):
         return data
     limit = max(_MAX_PART_DECOMPRESSED, min(walk.max_size, walk.decompress_budget))
     wbits = 16 + zlib.MAX_WBITS if content_encoding == "gzip" else -zlib.MAX_WBITS
     decompressed = bytearray()
-    while data and len(decompressed) < limit:
-        decompressor = zlib.decompressobj(wbits)
-        decompressed += decompressor.decompress(data, limit - len(decompressed))
-        if not decompressor.eof:
-            break
-        data = decompressor.unused_data
-    walk.decompress_budget -= len(decompressed)
-    return decompressed
+    try:
+        while data and len(decompressed) < limit:
+            decompressor = zlib.decompressobj(wbits)
+            decompressed += decompressor.decompress(data, limit - len(decompressed))
+            data = decompressor.unused_data
+            if not decompressor.eof or not data.startswith(b"\x1f\x8b"):
+                break
+    except zlib.error:
+        logger.debug("aiohttp::multipart decompression stopped", exc_info=True)
+    finally:
+        walk.decompress_budget -= len(decompressed)
+    return decompressed if decompressed else data
 
 
 def _aiohttp_decodes(part: BodyPartReader) -> bool:
