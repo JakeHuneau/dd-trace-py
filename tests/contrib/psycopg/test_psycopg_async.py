@@ -29,7 +29,6 @@ class PsycopgCore(AsyncioTestCase):
         unpatch()
 
     async def _get_conn(self):
-        print(POSTGRES_CONFIG)
         conn = await psycopg.AsyncConnection.connect(**POSTGRES_CONFIG)
         return conn
 
