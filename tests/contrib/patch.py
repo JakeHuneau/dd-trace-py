@@ -8,13 +8,14 @@ from tempfile import NamedTemporaryFile
 from textwrap import dedent
 import unittest
 
+import pytest
+
 from ddtrace import __version__
 from ddtrace.internal.compat import is_wrapted
 from ddtrace.internal.wrapping import get_wrapped as _dd_get_wrapped
 from ddtrace.internal.wrapping import is_wrapped as _dd_is_wrapped
-from tests.subprocesstest import SubprocessTestCase
-from tests.subprocesstest import run_in_subprocess
-from tests.utils import call_program
+from tests.process import case_context
+from tests.process import run_process
 
 
 TRACER_VERSION = __version__
@@ -73,7 +74,7 @@ class PatchMixin(unittest.TestCase):
 
 def raise_if_no_attrs(f):
     """
-    A helper for PatchTestCase test methods that will check if there are any
+    A helper for patch scenario methods that will check if there are any
     modules to use else raise a NotImplementedError.
 
     :param f: method to wrap with a check
@@ -96,7 +97,7 @@ def raise_if_no_attrs(f):
 
 def noop_if_no_unpatch(f):
     """
-    A helper for PatchTestCase test methods that will no-op the test if the
+    A helper for patch scenario methods that will no-op the test if the
     __unpatch_func__ attribute is None
     """
 
@@ -128,14 +129,9 @@ def emit_integration_and_version_to_test_agent(integration_name, version, module
 
 
 class PatchTestCase:
-    """
-    unittest or other test runners will pick up the base test case as a testcase
-    since it inherits from unittest.TestCase unless we wrap it with this empty
-    parent class.
-    """
+    """Keep the reusable base out of test collection."""
 
-    @run_in_subprocess
-    class Base(SubprocessTestCase, PatchMixin):
+    class Base(PatchMixin):
         """Provides default test methods to be used for testing common integration patching logic.
         Each test method provides a default implementation which will use the
         provided attributes (described below). If the attributes are not
@@ -233,7 +229,7 @@ class PatchTestCase:
             )._supported_versions
             self._supported_versions = _supported_versions
 
-            super(PatchTestCase.Base, self).__init__(*args, **kwargs)
+            super().__init__(*args, **kwargs)
 
         def _gen_test_attrs(self, ops):
             """
@@ -778,7 +774,7 @@ class PatchTestCase:
                 env = os.environ.copy()
                 env["DD_TRACE_%s_ENABLED" % self.__integration_name__.upper()] = "1"
 
-                out, err, _, _ = call_program("ddtrace-run", sys.executable, f.name, env=env)
+                out, err, _, _ = run_process("ddtrace-run", sys.executable, f.name, env=env)
 
                 self.assertEqual(out, b"OK", "stderr:\n%s" % err.decode())
 
@@ -907,5 +903,49 @@ class PatchTestCase:
                 env["DD_TRACE_SAFE_INSTRUMENTATION_ENABLED"] = "1"
                 env["DD_TRACE_%s_ENABLED" % self.__integration_name__.upper()] = "1"
 
-                out, err, _, _ = call_program("ddtrace-run", sys.executable, f.name, env=env)
+                out, err, _, _ = run_process("ddtrace-run", sys.executable, f.name, env=env)
                 assert "OKK" in out.decode(), "stderr:\n%s" % err.decode()
+
+
+def run_scenario(module_name, class_name, scenario):
+    """Run a selected patch method with fresh imports and child-local setup."""
+    try:
+        module = importlib.import_module(module_name)
+        case_type = getattr(module, class_name)
+        with case_context(case_type, scenario) as case:
+            getattr(case, scenario)()
+    except (unittest.SkipTest, pytest.skip.Exception) as error:
+        sys.stdout.write(str(error))
+        raise SystemExit(77)
+    except pytest.xfail.Exception as error:
+        sys.stdout.write(str(error))
+        raise SystemExit(78)
+
+
+class PatchTestClass(pytest.Collector):
+    """Collect existing patch methods as independent child applications."""
+
+    def __init__(self, *args, obj, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.obj = obj
+        self.own_markers.extend(getattr(obj, "pytestmark", []))
+
+    def collect(self):
+        if not getattr(self.obj, "__test__", True):
+            return
+        for scenario in unittest.TestLoader().getTestCaseNames(self.obj):
+
+            def run(python_process, scenario=scenario):
+                result = python_process(
+                    "from tests.process import enable_test_assertions; enable_test_assertions(); "
+                    "from tests.contrib.patch import run_scenario; "
+                    f"run_scenario({self.obj.__module__!r}, {self.obj.__name__!r}, {scenario!r})"
+                )
+                if result.returncode == 77:
+                    pytest.skip(result.stdout.decode())
+                if result.returncode == 78:
+                    pytest.xfail(result.stdout.decode())
+                result.check_returncode()
+
+            run.pytestmark = getattr(getattr(self.obj, scenario), "pytestmark", [])
+            yield pytest.Function.from_parent(self, name=scenario, callobj=run)
