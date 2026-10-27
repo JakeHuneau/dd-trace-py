@@ -515,3 +515,17 @@ def test_mapping_formatting_does_not_repeat_user_conversion():
     tainted = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
     assert mod.do_modulo("%(tainted)s/%(object)s", {"tainted": tainted, "object": value}) == "tainted/1"
     assert value.calls == 1
+
+
+@pytest.mark.parametrize("extra", [{"unused": object()}, {object(): "unused"}])
+def test_mapping_formatting_unused_custom_entry_does_not_drop_taint(extra):
+    value = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
+    mapping = {"value": value, **extra}
+
+    result = mod.do_modulo("%(value)s", mapping)
+
+    assert result == "tainted"
+    ranges = get_tainted_ranges(result)
+    assert len(ranges) == 1
+    assert (ranges[0].start, ranges[0].length) == (0, len(value))
+    assert ranges[0].source == get_tainted_ranges(value)[0].source

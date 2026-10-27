@@ -85,11 +85,6 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
             py::list values;
             for (const auto item : mapping_items) {
                 const auto pair = py::reinterpret_borrow<py::tuple>(item);
-                const auto key = pair[0];
-                // Rebuilding the evidence mapping must not call user-defined key hashing.
-                if (!PyUnicode_CheckExact(key.ptr()) && !PyBytes_CheckExact(key.ptr())) {
-                    return return_candidate_result();
-                }
                 values.append(pair[1]);
             }
             parameters = py::tuple(values);
@@ -115,12 +110,6 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
                   as_formatted_evidence(AnyTextObjectToString(param_handle), ranges, TagMappingMode::Mapper, nullopt);
                 list_formatted_parameters.append(StringToPyObject(n_parameter, py_str_type));
             } else {
-                // A second formatting pass must not invoke a mapping value's conversion hooks again.
-                if (mapping_parameters && !PyLong_CheckExact(param_handle.ptr()) &&
-                    !PyFloat_CheckExact(param_handle.ptr()) && !PyBool_Check(param_handle.ptr()) &&
-                    param_handle.ptr() != Py_None) {
-                    return return_candidate_result();
-                }
                 list_formatted_parameters.append(param_handle);
             }
         }
@@ -130,7 +119,18 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
             Py_ssize_t index = 0;
             for (const auto item : mapping_items) {
                 const auto pair = py::reinterpret_borrow<py::tuple>(item);
-                formatted_mapping[pair[0]] = list_formatted_parameters[index++];
+                const auto key = pair[0];
+                const auto value = pair[1];
+                // Omit entries that could invoke user hooks when replayed. If referenced, the
+                // missing key makes replay fall back; unused entries do not suppress propagation.
+                const bool safe_key = PyUnicode_CheckExact(key.ptr()) || PyBytes_CheckExact(key.ptr());
+                const bool safe_value = is_text(value.ptr()) || PyLong_CheckExact(value.ptr()) ||
+                                        PyFloat_CheckExact(value.ptr()) || PyBool_Check(value.ptr()) ||
+                                        value.ptr() == Py_None;
+                if (safe_key && safe_value) {
+                    formatted_mapping[key] = list_formatted_parameters[index];
+                }
+                ++index;
             }
             formatted_parameters = std::move(formatted_mapping);
         } else {
@@ -140,6 +140,8 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
         py::object applied_params = py::reinterpret_steal<py::object>(
           do_modulo(StringToPyObject(fmttext, py_str_type).ptr(), formatted_parameters.ptr()));
         if (!applied_params) {
+            // Replay may omit a custom value. Fetch and clear its error before returning Python's valid result.
+            const py::error_already_set error;
             return return_candidate_result();
         }
 
