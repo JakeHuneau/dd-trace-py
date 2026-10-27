@@ -47,8 +47,7 @@ class TestTracedAsyncCursor(AsyncioTestCase):
                 )
                 getattr(self.cursor, method).assert_not_awaited()
 
-    @AsyncioTestCase.run_in_subprocess(env_overrides=dict(DD_DBM_PROPAGATION_MODE="full"))
-    @mark_asyncio
+    @pytest.mark.subprocess(env=dict(DD_DBM_PROPAGATION_MODE="full"))
     async def test_dbm_propagation_not_supported(self):
         cursor = self.cursor
         cfg = IntegrationConfig(Config(), "dbapi", service="dbapi_service")
@@ -60,15 +59,11 @@ class TestTracedAsyncCursor(AsyncioTestCase):
         await traced_cursor.execute("SELECT * FROM db;")
         cursor.execute.assert_called_once_with("SELECT * FROM db;")
 
-    @AsyncioTestCase.run_in_subprocess(
-        env_overrides=dict(
-            DD_DBM_PROPAGATION_MODE="service",
-            DD_SERVICE="orders-app",
-            DD_ENV="staging",
-            DD_VERSION="v7343437-d7ac743",
+    @pytest.mark.subprocess(
+        env=dict(
+            DD_DBM_PROPAGATION_MODE="service", DD_SERVICE="orders-app", DD_ENV="staging", DD_VERSION="v7343437-d7ac743"
         )
     )
-    @mark_asyncio
     async def test_cursor_execute_with_dbm_injection(self):
         cursor = self.cursor
         cfg = IntegrationConfig(Config(), "dbapi", service="orders-db", _dbm_propagator=_DBM_Propagator(0, "query"))
@@ -416,15 +411,11 @@ class TestFetchTracedAsyncCursor(AsyncioTestCase):
         assert len(spans) == 1
         self.reset()
 
-    @AsyncioTestCase.run_in_subprocess(
-        env_overrides=dict(
-            DD_DBM_PROPAGATION_MODE="full",
-            DD_SERVICE="orders-app",
-            DD_ENV="staging",
-            DD_VERSION="v7343437-d7ac743",
+    @pytest.mark.subprocess(
+        env=dict(
+            DD_DBM_PROPAGATION_MODE="full", DD_SERVICE="orders-app", DD_ENV="staging", DD_VERSION="v7343437-d7ac743"
         )
     )
-    @mark_asyncio
     async def test_cursor_execute_fetch_with_dbm_injection(self):
         cursor = self.cursor
         dbm_propagator = _DBM_Propagator(0, "query")

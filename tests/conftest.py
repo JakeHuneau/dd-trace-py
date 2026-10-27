@@ -63,7 +63,6 @@ from tests.process import DDTRACE_RUN
 from tests.process import PythonProcess
 from tests.process import run_process
 from tests.utils import TracerSpanContainer
-from tests.utils import call_program
 from tests.utils import request_token
 from tests.utils import scoped_tracer
 from tests.utils import snapshot_context as _snapshot_context
@@ -268,23 +267,6 @@ def clear_context_after_every_test():
         _DD_CONTEXTVAR.set(None)
 
 
-def create_ddtrace_subprocess_dir_and_return_test_pyfile(tmpdir):
-    # Create a test dir named `ddtrace_subprocess_dir` that will be used by the tracers
-    # inferred path service name as a fallback to DD_SERVICE
-    ddtrace_dir = tmpdir.join(DEFAULT_DDTRACE_SUBPROCESS_TEST_SERVICE_NAME)
-    if not ddtrace_dir.exists():
-        ddtrace_dir.mkdir()
-
-    # Check for __init__.py and create it if it doesn't exist
-    # The first dir without an init file aka 'ddtrace_subprocess_dir' will be our service name
-    init_file = ddtrace_dir.join("__init__.py")
-    if not init_file.exists():
-        init_file.write("")  # Create an empty __init__.py file
-
-    pyfile = ddtrace_dir.join("test.py")
-    return pyfile
-
-
 @pytest.fixture
 def ddtrace_tmp_path(tmp_path):
     # Create a test dir named `ddtrace_subprocess_dir` that will be used by the tracers
@@ -297,26 +279,6 @@ def ddtrace_tmp_path(tmp_path):
         init_file.write_text("")  # Create an empty __init__.py file
 
     return ddtrace_dir
-
-
-@pytest.fixture
-def run_python_code_in_subprocess(tmpdir):
-    def _run(code, **kwargs):
-        pyfile = create_ddtrace_subprocess_dir_and_return_test_pyfile(tmpdir)
-        pyfile.write(code)
-        return call_program(sys.executable, str(pyfile), **kwargs)
-
-    yield _run
-
-
-@pytest.fixture
-def ddtrace_run_python_code_in_subprocess(tmpdir):
-    def _run(code, **kwargs):
-        pyfile = create_ddtrace_subprocess_dir_and_return_test_pyfile(tmpdir)
-        pyfile.write(code)
-        return call_program(DDTRACE_RUN, sys.executable, str(pyfile), **kwargs)
-
-    yield _run
 
 
 @pytest.fixture

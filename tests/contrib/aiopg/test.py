@@ -19,7 +19,6 @@ from tests.contrib import shared_tests_async
 from tests.contrib.asyncio.utils import AsyncioTestCase
 from tests.contrib.asyncio.utils import mark_asyncio
 from tests.contrib.config import POSTGRES_CONFIG
-from tests.subprocesstest import run_in_subprocess
 from tests.utils import assert_is_measured
 
 
@@ -208,8 +207,8 @@ class AiopgTestCase(AsyncioTestCase):
             assert conn.closed
             assert len(self.pop_spans()) == 1
 
-    @mark_asyncio
-    @run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.subprocess(env=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.asyncio
     async def test_user_specified_service_v0(self):
         """
         v0: When a user specifies a service for the app
@@ -229,8 +228,8 @@ class AiopgTestCase(AsyncioTestCase):
         assert len(spans) == 1
         assert spans[0].service == "postgres"
 
-    @mark_asyncio
-    @run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.subprocess(env=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.asyncio
     async def test_user_specified_service_v1(self):
         """
         v1: When a user specifies a service for the app
@@ -250,8 +249,8 @@ class AiopgTestCase(AsyncioTestCase):
         assert len(spans) == 1
         assert spans[0].service == "mysvc"
 
-    @mark_asyncio
-    @run_in_subprocess(env_overrides=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.subprocess(env=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.asyncio
     async def test_unspecified_service_v1(self):
         """
         v1: When a user specifies a service for the app
@@ -267,8 +266,8 @@ class AiopgTestCase(AsyncioTestCase):
         assert len(spans) == 1
         assert spans[0].service == DEFAULT_SPAN_SERVICE_NAME
 
-    @mark_asyncio
-    @run_in_subprocess(env_overrides=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.subprocess(env=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.asyncio
     async def test_trace_span_name_v0_schema(self):
         conn = await self._get_conn()
         await (await conn.cursor()).execute("select 'blah'")
@@ -279,8 +278,8 @@ class AiopgTestCase(AsyncioTestCase):
         assert len(spans) == 1
         assert spans[0].name == "postgres.query"
 
-    @mark_asyncio
-    @run_in_subprocess(env_overrides=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.subprocess(env=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.asyncio
     async def test_trace_span_name_v1_schema(self):
         conn = await self._get_conn()
         await (await conn.cursor()).execute("select 'blah'")
@@ -291,10 +290,8 @@ class AiopgTestCase(AsyncioTestCase):
         assert len(spans) == 1
         assert spans[0].name == "postgresql.query"
 
-    @mark_asyncio
-    @AsyncioTestCase.run_in_subprocess(
-        env_overrides=dict(DD_AIOPG_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0")
-    )
+    @pytest.mark.subprocess(env=dict(DD_AIOPG_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.asyncio
     async def test_user_specified_service_integration_v0(self):
         conn = await self._get_conn()
 
@@ -305,10 +302,8 @@ class AiopgTestCase(AsyncioTestCase):
         span = spans[0]
         assert span.service == "mysvc"
 
-    @mark_asyncio
-    @AsyncioTestCase.run_in_subprocess(
-        env_overrides=dict(DD_AIOPG_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1")
-    )
+    @pytest.mark.subprocess(env=dict(DD_AIOPG_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.asyncio
     async def test_user_specified_service_integration_v1(self):
         conn = await self._get_conn()
 
@@ -319,8 +314,8 @@ class AiopgTestCase(AsyncioTestCase):
         span = spans[0]
         assert span.service == "mysvc"
 
-    @mark_asyncio
-    @AsyncioTestCase.run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.subprocess(env=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.asyncio
     async def test_user_specified_service_env_var_v0(self):
         conn = await self._get_conn()
 
@@ -331,8 +326,8 @@ class AiopgTestCase(AsyncioTestCase):
         span = spans[0]
         assert span.service == "postgres"
 
-    @mark_asyncio
-    @AsyncioTestCase.run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.subprocess(env=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.asyncio
     async def test_user_specified_service_env_var_v1(self):
         conn = await self._get_conn()
 
@@ -343,8 +338,8 @@ class AiopgTestCase(AsyncioTestCase):
         span = spans[0]
         assert span.service == "mysvc"
 
-    @mark_asyncio
-    @AsyncioTestCase.run_in_subprocess(env_overrides=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.subprocess(env=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.asyncio
     async def test_span_name_v0_schema(self):
         conn = await self._get_conn()
 
@@ -355,8 +350,8 @@ class AiopgTestCase(AsyncioTestCase):
         span = spans[0]
         assert span.name == "postgres.query"
 
-    @mark_asyncio
-    @AsyncioTestCase.run_in_subprocess(env_overrides=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.subprocess(env=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.asyncio
     async def test_span_name_v1_schema(self):
         conn = await self._get_conn()
 

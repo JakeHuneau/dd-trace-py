@@ -36,7 +36,8 @@ class TestRedisClusterPatch(TracerTestCase):
         unpatch()
         super().tearDown()
 
-    @TracerTestCase.run_in_subprocess(env_overrides=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.skipif(redis.VERSION < (4, 1), reason="redis.cluster is not implemented in redis<4.1")
+    @pytest.mark.subprocess(env=dict(DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
     def test_span_service_name_v1(self):
         us = self.r.get("cheese")
         assert us is None
@@ -136,7 +137,8 @@ class TestRedisClusterPatch(TracerTestCase):
         assert spans, spans
         assert len(spans) == 1
 
-    @TracerTestCase.run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
+    @pytest.mark.skipif(redis.VERSION < (4, 1), reason="redis.cluster is not implemented in redis<4.1")
+    @pytest.mark.subprocess(env=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
     def test_user_specified_service_v0(self):
         """
         When a user specifies a service for the app
@@ -153,7 +155,8 @@ class TestRedisClusterPatch(TracerTestCase):
         span = find_redis_span(self.get_spans(), resource="GET")
         assert span.service != "mysvc"
 
-    @TracerTestCase.run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
+    @pytest.mark.skipif(redis.VERSION < (4, 1), reason="redis.cluster is not implemented in redis<4.1")
+    @pytest.mark.subprocess(env=dict(DD_SERVICE="mysvc", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
     def test_user_specified_service_v1(self):
         """
         When a user specifies a service for the app
@@ -170,24 +173,23 @@ class TestRedisClusterPatch(TracerTestCase):
         span = find_redis_span(self.get_spans(), resource="GET")
         assert span.service == "mysvc"
 
-    @TracerTestCase.run_in_subprocess(
-        env_overrides=dict(DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0")
-    )
+    @pytest.mark.skipif(redis.VERSION < (4, 1), reason="redis.cluster is not implemented in redis<4.1")
+    @pytest.mark.subprocess(env=dict(DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0"))
     def test_env_user_specified_rediscluster_service_v0(self):
         self.r.get("cheese")
         span = find_redis_span(self.get_spans(), resource="GET", raw_command="GET cheese")
         assert span.service == "myrediscluster", span.service
 
-    @TracerTestCase.run_in_subprocess(
-        env_overrides=dict(DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1")
-    )
+    @pytest.mark.skipif(redis.VERSION < (4, 1), reason="redis.cluster is not implemented in redis<4.1")
+    @pytest.mark.subprocess(env=dict(DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1"))
     def test_env_user_specified_rediscluster_service_v1(self):
         self.r.get("cheese")
         span = find_redis_span(self.get_spans(), resource="GET")
         assert span.service == "myrediscluster", span.service
 
-    @TracerTestCase.run_in_subprocess(
-        env_overrides=dict(DD_SERVICE="app-svc", DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0")
+    @pytest.mark.skipif(redis.VERSION < (4, 1), reason="redis.cluster is not implemented in redis<4.1")
+    @pytest.mark.subprocess(
+        env=dict(DD_SERVICE="app-svc", DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v0")
     )
     def test_service_precedence_v0(self):
         self.r.get("cheese")
@@ -196,8 +198,9 @@ class TestRedisClusterPatch(TracerTestCase):
 
         self.reset()
 
-    @TracerTestCase.run_in_subprocess(
-        env_overrides=dict(DD_SERVICE="app-svc", DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1")
+    @pytest.mark.skipif(redis.VERSION < (4, 1), reason="redis.cluster is not implemented in redis<4.1")
+    @pytest.mark.subprocess(
+        env=dict(DD_SERVICE="app-svc", DD_REDIS_SERVICE="myrediscluster", DD_TRACE_SPAN_ATTRIBUTE_SCHEMA="v1")
     )
     def test_service_precedence_v1(self):
         self.r.get("cheese")
