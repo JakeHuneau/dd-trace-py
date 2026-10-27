@@ -14,7 +14,7 @@ from ddtrace import __version__
 from ddtrace.internal.compat import is_wrapted
 from ddtrace.internal.wrapping import get_wrapped as _dd_get_wrapped
 from ddtrace.internal.wrapping import is_wrapped as _dd_is_wrapped
-from tests.process import case_context
+from tests.process import run_class_method
 from tests.process import run_process
 
 
@@ -910,10 +910,7 @@ class PatchTestCase:
 def run_scenario(module_name, class_name, scenario):
     """Run a selected patch method with fresh imports and child-local setup."""
     try:
-        module = importlib.import_module(module_name)
-        case_type = getattr(module, class_name)
-        with case_context(case_type, scenario) as case:
-            getattr(case, scenario)()
+        run_class_method(module_name, class_name, scenario)
     except (unittest.SkipTest, pytest.skip.Exception) as error:
         sys.stdout.write(str(error))
         raise SystemExit(77)

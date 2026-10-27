@@ -16,11 +16,10 @@ from os.path import splitext
 from pathlib import Path
 import platform
 import random
-import shutil
 import subprocess
 import sys
 from tempfile import NamedTemporaryFile
-from tempfile import mkdtemp
+from tempfile import TemporaryDirectory
 import time
 from typing import Any
 from typing import Callable
@@ -402,10 +401,6 @@ def run_function_from_file(item, params=None):
     if marker.kwargs.get("ddtrace_run", False):
         args.insert(0, DDTRACE_RUN)
 
-    # Add -m if running script as a module
-    if run_module:
-        args.append("-m")
-
     # Override environment variables for the subprocess
     env = os.environ.copy()
     if isinstance(item, ClassSubprocessItem):
@@ -428,97 +423,69 @@ def run_function_from_file(item, params=None):
     expected_out = marker.kwargs.get("out", "")
     expected_err = marker.kwargs.get("err", "")
 
-    # Create a temporary dir named `ddtrace_subprocess_dir` that will be used for service naming
-    # consistency. Use a unique parent dir so parallel xdist workers don't share the same path
-    # and race on cleanup (shutil.rmtree would delete files still in use by other workers).
-    temp_dir = mkdtemp()
-    custom_temp_dir = os.path.join(temp_dir, DEFAULT_DDTRACE_SUBPROCESS_TEST_SERVICE_NAME)
-
-    os.makedirs(custom_temp_dir, exist_ok=True)
-
-    try:
-        with NamedTemporaryFile(mode="wb", suffix=".pyc", dir=custom_temp_dir, delete=False) as fp:
-            if isinstance(item, ClassSubprocessItem):
-                scenario = ast.parse(
-                    f"from tests.process import run_class_method; run_class_method(*{item.method_spec!r})"
-                )
-            else:
+    with contextlib.ExitStack() as stack:
+        cwd = None
+        if isinstance(item, ClassSubprocessItem):
+            args.extend(["-c", f"from tests.process import run_class_method; run_class_method(*{item.method_spec!r})"])
+        else:
+            # Keep the service-name directory stable inside a unique parent for parallel workers.
+            temp_dir = stack.enter_context(TemporaryDirectory())
+            custom_temp_dir = os.path.join(temp_dir, DEFAULT_DDTRACE_SUBPROCESS_TEST_SERVICE_NAME)
+            os.makedirs(custom_temp_dir)
+            with NamedTemporaryFile(mode="wb", suffix=".pyc", dir=custom_temp_dir, delete=False) as fp:
                 scenario = FunctionDefFinder(func).find(file)
-            # Keep test assertions active while imported application code retains its optimization level.
-            dump_code_to_file(compile(scenario, file, "exec", optimize=0), fp.file)
-
-            # If running a module with -m, we change directory to the module's
-            # folder and run the module directly.
-            if run_module:
-                cwd, module = split(splitext(fp.name)[0])
-                args.append(module)
-            elif isinstance(item, ClassSubprocessItem):
-                cwd = None
-                args.extend(
-                    [
-                        "-c",
-                        "import importlib.machinery; "
-                        f"exec(importlib.machinery.SourcelessFileLoader('__main__', {fp.name!r}).get_code('__main__'))",
-                    ]
-                )
-            else:
-                cwd = None
-                args.append(fp.name)
-
-            # Add any extra requested args
-            args.extend(marker.kwargs.get("args", []))
-
-            def _subprocess_wrapper() -> None:
-                out: Union[bytes, str]
-                err: Union[bytes, str]
-                out, err, status, _ = run_process(*args, env=env, cwd=cwd, timeout=timeout)
-
-                error_text = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else err
-                if status == 1 and (
-                    "unittest.case.SkipTest:" in error_text
-                    or "unittest.SkipTest:" in error_text
-                    or "_pytest.outcomes.Skipped:" in error_text
-                ):
-                    pytest.skip(error_text.splitlines()[-1])
-
-                xfailed = (
-                    "_pytest.outcomes.XFailed" in err if isinstance(err, str) else b"_pytest.outcomes.XFailed" in err
-                ) and status == 1
-                if xfailed:
-                    pytest.xfail("subprocess test resulted in XFail")
-                    return
-
-                if callable(expected_status):
-                    status_ok = expected_status(status)
-                elif isinstance(expected_status, (set, tuple, list)):
-                    status_ok = status in expected_status
+                # Keep test assertions active while imported application code retains its optimization level.
+                dump_code_to_file(compile(scenario, file, "exec", optimize=0), fp.file)
+                if run_module:
+                    cwd, module = split(splitext(fp.name)[0])
+                    args.extend(["-m", module])
                 else:
-                    status_ok = status == expected_status
-                if not status_ok:
-                    raise AssertionError(
-                        "Expected status %s, got %s."
-                        "\n=== Captured STDOUT ===\n%r=== End of captured STDOUT ==="
-                        "\n=== Captured STDERR ===\n%r=== End of captured STDERR ==="
-                        % (expected_status, status, out, err)
-                    )
+                    args.append(fp.name)
 
-                if not is_stream_ok(out, expected_out):
-                    if check_logs:
-                        raise AssertionError("STDOUT: Expected [%r] got [%r]" % (expected_out, out))
-                    else:
-                        pytest.xfail("STDOUT: Expected [%r] got [%r]" % (expected_out, out))
+        args.extend(marker.kwargs.get("args", []))
+        out: Union[bytes, str]
+        err: Union[bytes, str]
+        out, err, status, _ = run_process(*args, env=env, cwd=cwd, timeout=timeout)
 
-                if not is_stream_ok(err, expected_err):
-                    if check_logs:
-                        raise AssertionError("STDERR: Expected [%r] got [%r]" % (expected_err, err))
-                    else:
-                        pytest.xfail("STDOUT: Expected [%r] got [%r]" % (expected_out, out))
+        error_text = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else err
+        if status == 1 and (
+            "unittest.case.SkipTest:" in error_text
+            or "unittest.SkipTest:" in error_text
+            or "_pytest.outcomes.Skipped:" in error_text
+        ):
+            pytest.skip(error_text.splitlines()[-1])
 
-            return _subprocess_wrapper()
-    finally:
-        # Clean up the unique parent temp directory (contains ddtrace_subprocess_dir)
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        xfailed = (
+            "_pytest.outcomes.XFailed" in err if isinstance(err, str) else b"_pytest.outcomes.XFailed" in err
+        ) and status == 1
+        if xfailed:
+            pytest.xfail("subprocess test resulted in XFail")
+            return
+
+        if callable(expected_status):
+            status_ok = expected_status(status)
+        elif isinstance(expected_status, (set, tuple, list)):
+            status_ok = status in expected_status
+        else:
+            status_ok = status == expected_status
+        if not status_ok:
+            raise AssertionError(
+                "Expected status %s, got %s."
+                "\n=== Captured STDOUT ===\n%r=== End of captured STDOUT ==="
+                "\n=== Captured STDERR ===\n%r=== End of captured STDERR ===" % (expected_status, status, out, err)
+            )
+
+        if not is_stream_ok(out, expected_out):
+            if check_logs:
+                raise AssertionError("STDOUT: Expected [%r] got [%r]" % (expected_out, out))
+            else:
+                pytest.xfail("STDOUT: Expected [%r] got [%r]" % (expected_out, out))
+
+        if not is_stream_ok(err, expected_err):
+            if check_logs:
+                raise AssertionError("STDERR: Expected [%r] got [%r]" % (expected_err, err))
+            else:
+                pytest.xfail("STDOUT: Expected [%r] got [%r]" % (expected_out, out))
 
 
 class ClassSubprocessItem(pytest.Function):
