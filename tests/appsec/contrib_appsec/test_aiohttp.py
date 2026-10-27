@@ -10,6 +10,7 @@ from typing import Optional
 from typing import Union
 from unittest import mock
 import urllib.parse
+import zlib
 
 from aiohttp import ClientError
 from aiohttp import ClientSession
@@ -305,6 +306,19 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
                 },
                 "POST",
             ),
+            ({"f": ("\r\nContent-Type: text/plain; charset=utf\u00e916\u00e9be", _ATTACK.encode("utf-16-be"))}, "POST"),
+            (
+                {
+                    "n": (
+                        "\r\nContent-Type: multipart/mixed; boundary=in",
+                        b"--in\r\nContent-Encoding: deflate\r\n\r\n"
+                        + zlib.compress(b"benign ")[2:-4]
+                        + zlib.compress(_ATTACK.encode())[2:-4]
+                        + b"\r\n--in--",
+                    )
+                },
+                "POST",
+            ),
         ],
         ids=[
             "base64",
@@ -337,6 +351,8 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             "dotted_charset_name",
             "json_part_with_trailing_text",
             "nested_gzip_with_trailing_bytes",
+            "non_ascii_charset_spelling",
+            "nested_two_deflate_members",
         ],
     )
     def test_multipart_parts_decoded_as_aiohttp(self, interface, entry_span, get_entry_span_tag, fields, method):

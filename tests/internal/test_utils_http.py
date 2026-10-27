@@ -64,6 +64,7 @@ def test_parse_form_multipart_handles_charset_suffix() -> None:
         ("zlib", 0, "utf-8"),
         ("utf.16be", 0, "utf-16-be"),
         ("ebcdic.cp.us", 0, "cp037"),
+        ("ebcdic\u00e9cp\u00e9us", 0, "cp037"),
         ("cp875", 0, "cp875"),
         ("unicode_escape", 0, "unicode-escape"),
         ("punycode", 100, "punycode"),
@@ -80,4 +81,6 @@ def test_inspectable_charset_does_not_cache_unknown_names() -> None:
     before = len(encodings._cache)
     for i in range(100):
         assert inspectable_charset(f"x-unknown-charset-{i}") == "utf-8"
+        inspectable_charset("utf" + "\u00e9" * (i + 1) + "8")
+        inspectable_charset("utf." * (i + 1) + "8")
     assert len(encodings._cache) == before

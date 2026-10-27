@@ -131,15 +131,18 @@ def _multipart_parser() -> Optional[Callable[[Any, bytes], Awaitable[dict[str, A
 
 def _parse_json_body(raw_body: bytes, charset: str, punycode: bool) -> Any:
     try:
+        parsed = parse_json_bytes(raw_body, charset, punycode)
+    except ValueError:
+        return _body_text(raw_body, charset)
+    return [parsed, _body_text(raw_body, charset)] if punycode else parsed
+
+
+def _body_text(raw_body: bytes, charset: str) -> str:
+    try:
         text = raw_body.decode(charset, errors="replace")
     except Exception:
         text = raw_body.decode("utf-8", errors="replace")
-    text = text[: DDWAF_MAX_STRING_LENGTH + 1]
-    try:
-        parsed = parse_json_bytes(raw_body, charset, punycode)
-    except ValueError:
-        return text
-    return [parsed, text] if punycode else parsed
+    return text[: DDWAF_MAX_STRING_LENGTH + 1]
 
 
 def _check_blocked() -> None:

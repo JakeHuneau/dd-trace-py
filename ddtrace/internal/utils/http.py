@@ -70,21 +70,25 @@ def _known_charsets() -> frozenset[str]:
     return frozenset(encodings.aliases.aliases) | frozenset(encodings.aliases.aliases.values()) | modules
 
 
+_CHARSET_SEPARATORS = re.compile(r"[^a-z0-9.]+")
+
+
 def _normalized_charset(charset: str) -> str:
-    return encodings.normalize_encoding(charset).lower()
+    return _CHARSET_SEPARATORS.sub("_", charset.lower()).strip("_")
 
 
 def inspectable_charset(charset: Any, size: int = 0) -> str:
     """Return the text codec to decode a body of size bytes with, or utf-8 when it is unusable or too slow."""
     if not isinstance(charset, str) or not 0 < len(charset) <= 64:
         return "utf-8"
-    # Only known names: codecs.lookup caches every unknown name forever.
+    # Only look up known names: codecs.lookup caches every name it is given forever.
     normalized = _normalized_charset(charset)
     known = _known_charsets()
-    if normalized not in known and normalized.replace(".", "_") not in known:
+    name = normalized if normalized in known else normalized.replace(".", "_")
+    if name not in known:
         return "utf-8"
     try:
-        info = codecs.lookup(charset)
+        info = codecs.lookup(name)
     except Exception:
         return "utf-8"
     if not getattr(info, "_is_text_encoding", True):
