@@ -1,7 +1,5 @@
 from collections.abc import Awaitable
 from collections.abc import Mapping
-import contextlib
-import json
 import re
 from typing import Any
 from typing import Callable
@@ -32,6 +30,7 @@ from ddtrace.internal.utils.http import _get_blocked_template
 from ddtrace.internal.utils.http import classify_media_type
 from ddtrace.internal.utils.http import inspectable_charset
 from ddtrace.internal.utils.http import is_utf8_charset
+from ddtrace.internal.utils.http import parse_json_bytes
 import ddtrace.vendor.xmltodict as xmltodict
 
 
@@ -130,12 +129,15 @@ def _multipart_parser() -> Optional[Callable[[Any, bytes], Awaitable[dict[str, A
 
 
 def _parse_json_body(raw_body: bytes, charset: str) -> Any:
-    with contextlib.suppress(Exception):
-        return json.loads(raw_body if is_utf8_charset(charset) else raw_body.decode(charset))
-    if not is_utf8_charset(charset):
-        with contextlib.suppress(Exception):
-            return json.loads(raw_body)
-    return raw_body.decode(charset, errors="replace")[: DDWAF_MAX_STRING_LENGTH + 1]
+    try:
+        return parse_json_bytes(raw_body, charset)
+    except ValueError:
+        pass
+    try:
+        text = raw_body.decode(charset, errors="replace")
+    except Exception:
+        text = raw_body.decode("utf-8", errors="replace")
+    return text[: DDWAF_MAX_STRING_LENGTH + 1]
 
 
 def _check_blocked() -> None:

@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import binascii
-import json
 from typing import Any
 from typing import Optional
 from typing import Union
@@ -23,7 +22,9 @@ from ddtrace.internal.logger import get_logger
 from ddtrace.internal.utils.http import MediaType
 from ddtrace.internal.utils.http import classify_media_type
 from ddtrace.internal.utils.http import inspectable_charset
+from ddtrace.internal.utils.http import is_slow_charset
 from ddtrace.internal.utils.http import is_utf8_charset
+from ddtrace.internal.utils.http import parse_json_bytes
 
 
 logger = get_logger(__name__)
@@ -35,13 +36,15 @@ _DEFAULT_MAX_PARTS = 1000
 # One character past the WAF limit, so the WAF still reports the value as truncated.
 _MAX_STORED_LENGTH = DDWAF_MAX_STRING_LENGTH + 1
 _YIELD_EVERY = 25
+_MAX_SLOW_CHARSET_DECODED = 16 * 1024
 
 
 class _Walk:
-    __slots__ = ("decompress_budget", "exhausted", "parts_left", "max_size", "seen")
+    __slots__ = ("decompress_budget", "slow_charset_budget", "exhausted", "parts_left", "max_size", "seen")
 
     def __init__(self, max_fields: int, max_size: int) -> None:
         self.decompress_budget = _MAX_TOTAL_DECOMPRESSED
+        self.slow_charset_budget = _MAX_SLOW_CHARSET_DECODED
         self.exhausted = False
         self.parts_left = max_fields
         self.max_size = max_size
@@ -162,7 +165,10 @@ def _decode(part: BodyPartReader, raw: bytearray, walk: _Walk) -> list[Any]:
         logger.debug("aiohttp::multipart content decoding failed", exc_info=True)
     declared_charset = part.get_charset(default="")
     if declared_charset:
-        declared_charset = inspectable_charset(declared_charset, len(data))
+        size = len(data) if walk.slow_charset_budget >= len(data) else walk.max_size + 1
+        declared_charset = inspectable_charset(declared_charset, size)
+        if is_slow_charset(declared_charset):
+            walk.slow_charset_budget -= len(data)
     is_text = content_type is None or content_type.startswith("text/")
     charset = (declared_charset or "utf-8") if is_text else "utf-8"
     values = [_value(data, charset, media_type)]
@@ -177,13 +183,9 @@ def _decode(part: BodyPartReader, raw: bytearray, walk: _Walk) -> list[Any]:
 def _value(data: Union[bytes, bytearray], charset: str, media_type: MediaType) -> Any:
     if media_type is MediaType.JSON:
         try:
-            return json.loads(data if is_utf8_charset(charset) else data.decode(charset))
-        except Exception:
-            if not is_utf8_charset(charset):
-                try:
-                    return json.loads(data)
-                except Exception:
-                    logger.debug("aiohttp::multipart JSON parsing failed", exc_info=True)
+            return parse_json_bytes(data, charset)
+        except ValueError:
+            logger.debug("aiohttp::multipart JSON parsing failed", exc_info=True)
     if media_type is MediaType.FORM_URLENCODED:
         try:
             form: dict[str, list[str]] = {}
@@ -219,11 +221,15 @@ def _content_decode(
     content_encoding = part.headers.get(hdrs.CONTENT_ENCODING, "").lower()
     if content_encoding not in ("deflate", "gzip") or not _aiohttp_decodes(part):
         return data
-    limit = _MAX_PART_DECOMPRESSED
-    if media_type in (MediaType.JSON, MediaType.FORM_URLENCODED):
-        limit = max(limit, min(walk.max_size, walk.decompress_budget))
+    limit = max(_MAX_PART_DECOMPRESSED, min(walk.max_size, walk.decompress_budget))
     wbits = 16 + zlib.MAX_WBITS if content_encoding == "gzip" else -zlib.MAX_WBITS
-    decompressed = zlib.decompressobj(wbits).decompress(data, limit)
+    decompressed = bytearray()
+    while data and len(decompressed) < limit:
+        decompressor = zlib.decompressobj(wbits)
+        decompressed += decompressor.decompress(data, limit - len(decompressed))
+        if not decompressor.eof:
+            break
+        data = decompressor.unused_data
     walk.decompress_budget -= len(decompressed)
     return decompressed
 

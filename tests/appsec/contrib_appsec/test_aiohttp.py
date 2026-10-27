@@ -271,6 +271,29 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             ),
             ({"c": ("\r\nContent-Type: text/plain; charset=\xff", b"x"), "f": _ATTACK.encode()}, "POST"),
             ({"f": ("\r\nContent-Type: text/plain; charset=hz", b"~\n" * 30000 + _ATTACK.encode())}, "POST"),
+            (
+                {
+                    "n": (
+                        "\r\nContent-Type: multipart/mixed; boundary=in",
+                        b"--in\r\nContent-Encoding: gzip\r\n\r\n"
+                        + gzip.compress(b"benign ")
+                        + gzip.compress(_ATTACK.encode())
+                        + b"\r\n--in--",
+                    )
+                },
+                "POST",
+            ),
+            (
+                {
+                    "n": (
+                        "\r\nContent-Type: multipart/mixed; boundary=in",
+                        b"--in\r\nContent-Type: text/plain; charset=hz\r\nContent-Encoding: gzip\r\n\r\n"
+                        + gzip.compress(b"~\n" * 40000 + _ATTACK.encode())
+                        + b"\r\n--in--",
+                    )
+                },
+                "POST",
+            ),
         ],
         ids=[
             "base64",
@@ -298,6 +321,8 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             "after_bytes_codec_charset",
             "after_undecodable_charset_name",
             "after_zero_width_escapes",
+            "nested_two_member_gzip",
+            "nested_compressed_zero_width_escapes",
         ],
     )
     def test_multipart_parts_decoded_as_aiohttp(self, interface, entry_span, get_entry_span_tag, fields, method):
@@ -419,8 +444,9 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
         [
             ("application/json; charset=punycode", lambda text: text.encode("punycode")),
             ("application/json; charset*=utf-8''utf-8", lambda text: text.encode()),
+            ("application/json; charset=idna", lambda text: _ATTACK.encode()),
         ],
-        ids=["punycode", "rfc2231_charset"],
+        ids=["punycode", "rfc2231_charset", "invalid_json_idna"],
     )
     def test_json_body_unusual_charset(self, interface, entry_span, get_entry_span_tag, content_type, encode):
         with override_global_config(dict(_asm_enabled=True, _asm_static_rule_file=rules.RULES_SRB)):
@@ -428,6 +454,13 @@ class Test_Aiohttp(_Test_Aiohttp_Base, utils.Contrib_TestClass_For_Threats):
             response = interface.client.post(
                 "/asm/", data=encode(json.dumps({"a": _ATTACK})), content_type=content_type
             )
+            self.assert_blocked(response, entry_span, get_entry_span_tag, "tst-037-003")
+
+    def test_large_punycode_json_body(self, interface, entry_span, get_entry_span_tag):
+        body = json.dumps({"pad": "a" * 5000, "a": _ATTACK}).encode("punycode")
+        with override_global_config(dict(_asm_enabled=True, _asm_static_rule_file=rules.RULES_SRB)):
+            self.update_tracer(interface)
+            response = interface.client.post("/asm/", data=body, content_type="application/json; charset=punycode")
             self.assert_blocked(response, entry_span, get_entry_span_tag, "tst-037-003")
 
     def test_multipart_slow_charset_across_parts_is_bounded(self, interface):

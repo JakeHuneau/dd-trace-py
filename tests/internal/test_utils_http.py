@@ -68,3 +68,12 @@ def test_parse_form_multipart_handles_charset_suffix() -> None:
 )
 def test_inspectable_charset(charset, size, expected) -> None:
     assert inspectable_charset(charset, size) == expected
+
+
+def test_inspectable_charset_does_not_cache_unknown_names() -> None:
+    import encodings
+
+    before = len(encodings._cache)
+    for i in range(100):
+        assert inspectable_charset(f"x-unknown-charset-{i}") == "utf-8"
+    assert len(encodings._cache) == before

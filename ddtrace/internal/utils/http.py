@@ -2,8 +2,11 @@ import codecs
 from collections.abc import Generator  # noqa:F401
 from collections.abc import Mapping
 from contextlib import contextmanager
+from contextlib import suppress
 from dataclasses import dataclass
 from email.encoders import encode_noop
+import encodings
+import encodings.aliases
 from enum import Enum
 from json import loads
 import logging
@@ -56,14 +59,16 @@ def is_utf8_charset(charset: str) -> bool:
 
 
 _SLOW_CHARSETS = frozenset(("punycode", "idna"))
-
-
 _SLOW_CHARSET_MAX_SIZE = 4096
+_KNOWN_CHARSETS = frozenset(encodings.aliases.aliases) | frozenset(encodings.aliases.aliases.values()) | _SLOW_CHARSETS
 
 
 def inspectable_charset(charset: Any, size: int = 0) -> str:
     """Return the text codec to decode a body of size bytes with, or utf-8 when it is unusable or too slow."""
-    if not isinstance(charset, str) or not charset:
+    if not isinstance(charset, str) or not 0 < len(charset) <= 64:
+        return "utf-8"
+    # Only known names: codecs.lookup caches every unknown name forever.
+    if encodings.normalize_encoding(charset).lower() not in _KNOWN_CHARSETS:
         return "utf-8"
     try:
         info = codecs.lookup(charset)
@@ -74,6 +79,27 @@ def inspectable_charset(charset: Any, size: int = 0) -> str:
     if info.name in _SLOW_CHARSETS and size > _SLOW_CHARSET_MAX_SIZE:
         return "utf-8"
     return info.name
+
+
+def is_slow_charset(charset: str) -> bool:
+    """Whether a codec name returned by inspectable_charset has a slow decoder."""
+    return charset in _SLOW_CHARSETS
+
+
+def parse_json_bytes(data: Union[bytes, bytearray], charset: str) -> Any:
+    """Parse a JSON body as an application would, or raise ValueError."""
+    import json
+
+    utf8 = is_utf8_charset(charset)
+    attempts: list[Callable[[], Any]] = [lambda: json.loads(data if utf8 else data.decode(charset))]
+    if not utf8:
+        attempts.append(lambda: json.loads(data))
+    if b"-" in data:
+        attempts.append(lambda: json.loads(bytes(data).rpartition(b"-")[0]))
+    for attempt in attempts:
+        with suppress(Exception):
+            return attempt()
+    raise ValueError("not a JSON body")
 
 
 def classify_media_type(content_type: Optional[str]) -> MediaType:
