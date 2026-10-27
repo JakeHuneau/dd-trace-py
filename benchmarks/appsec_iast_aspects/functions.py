@@ -128,6 +128,10 @@ def iast_modulo_aspect(tainted_str="example"):
     return modulo_aspect("hello %s", tainted_str)  # noqa: F821
 
 
+def iast_modulo_mapping_aspect(tainted_str="example"):
+    return modulo_aspect("hello %(value)s", {"value": tainted_str, "number": 42})  # noqa: F821
+
+
 def iast_modulo_aspect_for_bytes(tainted_bytes=b"example"):
     return modulo_aspect(b"hello %s", tainted_bytes)  # noqa: F821
 

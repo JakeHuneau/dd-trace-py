@@ -100,6 +100,9 @@ experiments:
           - name: iastaspects-modulo_aspect
             thresholds:
               - execution_time < 18.75 ms
+          - name: iastaspects-modulo_mapping_aspect
+            thresholds:
+              - execution_time < 21.50 ms
           - name: iastaspects-modulo_aspect_for_bytearray_bytearray
             thresholds:
               - execution_time < 19.35 ms

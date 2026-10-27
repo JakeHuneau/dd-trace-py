@@ -1,4 +1,7 @@
+import builtins
+from collections.abc import Mapping
 import math
+import sys
 from typing import Any
 
 import pytest
@@ -11,6 +14,42 @@ from tests.appsec.iast.iast_utils import _iast_patched_module
 
 
 mod = _iast_patched_module("benchmarks.bm.iast_fixtures.str_methods")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 15), reason="Requires Python 3.15 frozendict")
+@pytest.mark.parametrize("tainted_template", [False, True])
+def test_format_map_frozendict_preserves_taint(tainted_template):
+    template = _to_tainted_string_with_origin(
+        ":+-<template>prefix<template>-+: {value}" if tainted_template else "prefix {value}"
+    )
+    value = _to_tainted_string_with_origin(":+-<parameter>input<parameter>-+:")
+    mapping = builtins.frozendict({"value": value})
+
+    result = mod.do_format_map(template, mapping)
+
+    assert result == "prefix input"
+    expected = ":+-<template>prefix<template>-+: " if tainted_template else "prefix "
+    assert as_formatted_evidence(result, tag_mapping_function=None) == expected + ":+-<parameter>input<parameter>-+:"
+
+
+def test_format_map_does_not_evaluate_unused_custom_mapping_values():
+    class CountingMapping(Mapping):
+        def __init__(self):
+            self.calls = []
+
+        def __getitem__(self, key):
+            self.calls.append(key)
+            return "input"
+
+        def __iter__(self):
+            return iter(("value", "unused"))
+
+        def __len__(self):
+            return 2
+
+    mapping = CountingMapping()
+    assert mod.do_format_map("prefix {value}", mapping) == "prefix input"
+    assert mapping.calls == ["value"]
 
 
 class TestOperatorFormatMapReplacement(BaseReplacement):

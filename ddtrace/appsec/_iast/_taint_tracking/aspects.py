@@ -1,4 +1,5 @@
 import _io
+import builtins
 from builtins import bytearray as builtin_bytearray
 from builtins import bytes as builtin_bytes
 import codecs
@@ -52,6 +53,7 @@ from ddtrace.appsec._iast_context import is_iast_request_enabled
 
 
 TEXT_TYPES = Union[str, bytes, bytearray]
+_DICT_TYPES = (dict, getattr(builtins, "frozendict", dict))
 
 _extend_aspect = aspects.extend_aspect
 _join_aspect = aspects.join_aspect
@@ -489,7 +491,9 @@ def format_map_aspect(orig_function: Optional[Callable], flag_added_args: int, *
 
     try:
         mapping = parse_params(0, "mapping", None, *args, **kwargs)
-        mapping_tuple = tuple(mapping if not isinstance(mapping, dict) else mapping.values())
+        if not isinstance(mapping, _DICT_TYPES):
+            return result
+        mapping_tuple = tuple(mapping.values())
         ranges_orig, candidate_text_ranges = are_all_text_all_ranges(
             candidate_text,
             args + mapping_tuple,
@@ -509,8 +513,6 @@ def format_map_aspect(orig_function: Optional[Callable], flag_added_args: int, *
                     )
                     for key, value in mapping.items()
                 }
-                if isinstance(mapping, dict)
-                else tuple(mapping)
             ),
             ranges_orig=ranges_orig,
         )

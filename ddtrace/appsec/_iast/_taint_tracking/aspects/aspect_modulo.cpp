@@ -78,15 +78,28 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
         py::tuple parameters;
         if (mapping_parameters) {
             // Snapshot strong references before formatting can allocate or call Python.
-            mapping_items = py::reinterpret_steal<py::list>(PyDict_Items(candidate_tuple));
-            if (!mapping_items) {
+            auto items = py::reinterpret_steal<py::list>(PyDict_Items(candidate_tuple));
+            if (!items) {
                 throw py::error_already_set();
             }
+            py::list safe_items;
             py::list values;
-            for (const auto item : mapping_items) {
+            for (const auto item : items) {
                 const auto pair = py::reinterpret_borrow<py::tuple>(item);
-                values.append(pair[1]);
+                const auto key = pair[0];
+                const auto value = pair[1];
+                // Classify before range discovery: even isinstance checks on custom
+                // values can invoke __class__ and evaluate unused lazy proxies.
+                const bool safe_key = PyUnicode_CheckExact(key.ptr()) || PyBytes_CheckExact(key.ptr());
+                const bool safe_value = is_text(value.ptr()) || PyLong_CheckExact(value.ptr()) ||
+                                        PyFloat_CheckExact(value.ptr()) || PyBool_Check(value.ptr()) ||
+                                        value.ptr() == Py_None;
+                if (safe_key && safe_value) {
+                    safe_items.append(pair);
+                    values.append(value);
+                }
             }
+            mapping_items = std::move(safe_items);
             parameters = py::tuple(values);
         } else {
             parameters =
@@ -120,16 +133,9 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
             for (const auto item : mapping_items) {
                 const auto pair = py::reinterpret_borrow<py::tuple>(item);
                 const auto key = pair[0];
-                const auto value = pair[1];
                 // Omit entries that could invoke user hooks when replayed. If referenced, the
                 // missing key makes replay fall back; unused entries do not suppress propagation.
-                const bool safe_key = PyUnicode_CheckExact(key.ptr()) || PyBytes_CheckExact(key.ptr());
-                const bool safe_value = is_text(value.ptr()) || PyLong_CheckExact(value.ptr()) ||
-                                        PyFloat_CheckExact(value.ptr()) || PyBool_Check(value.ptr()) ||
-                                        value.ptr() == Py_None;
-                if (safe_key && safe_value) {
-                    formatted_mapping[key] = list_formatted_parameters[index];
-                }
+                formatted_mapping[key] = list_formatted_parameters[index];
                 ++index;
             }
             formatted_parameters = std::move(formatted_mapping);
@@ -151,7 +157,7 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
         }
         auto result = py::reinterpret_steal<py::object>(res_pyobject);
         // Width or precision can truncate evidence markers. Preserve Python's result in that case.
-        if (mapping_parameters && !result.equal(py::handle(candidate_result))) {
+        if (Py_TYPE(result.ptr()) != Py_TYPE(candidate_result) || !result.equal(py::handle(candidate_result))) {
             return return_candidate_result();
         }
         return result.release().ptr();

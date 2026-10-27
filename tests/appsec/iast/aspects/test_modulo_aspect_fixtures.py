@@ -517,6 +517,54 @@ def test_mapping_formatting_does_not_repeat_user_conversion():
     assert value.calls == 1
 
 
+def test_mapping_formatting_does_not_repeat_text_subclass_conversion():
+    class Value(str):
+        calls = 0
+
+        def __str__(self):
+            self.calls += 1
+            return str(self.calls)
+
+    value = Value("original")
+    tainted = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
+    assert mod.do_modulo("%(tainted)s/%(object)s", {"tainted": tainted, "object": value}) == "tainted/1"
+    assert value.calls == 1
+
+
+def test_mapping_formatting_preserves_template_subclass_result():
+    class Template(str):
+        def __mod__(self, value):
+            return Template(str.__mod__(self, value))
+
+    value = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
+    result = mod.do_modulo(Template("%(value)s"), {"value": value})
+    assert type(result) is Template
+    assert result == "tainted"
+
+
+def test_mapping_formatting_does_not_evaluate_unused_lazy_proxy():
+    class Lazy:
+        hits = 0
+
+        @property
+        def __class__(self):
+            self.hits += 1
+            return Lazy
+
+    lazy = Lazy()
+    value = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
+    result = mod.do_modulo("%(value)s", {"value": value, "unused": lazy})
+    assert result == "tainted"
+    assert len(get_tainted_ranges(result)) == 1
+    assert lazy.hits == 0
+
+
+@pytest.mark.parametrize("template,value", [("%.3s", "abcdef"), ("%10s", "abc"), ("%r", b"abc")])
+def test_modulo_replay_preserves_python_output(template, value):
+    value = taint_pyobject(value, "parameter", value, OriginType.PARAMETER)
+    assert mod.do_modulo(template, (value,)) == template % (value,)
+
+
 @pytest.mark.parametrize("extra", [{"unused": object()}, {object(): "unused"}])
 def test_mapping_formatting_unused_custom_entry_does_not_drop_taint(extra):
     value = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
