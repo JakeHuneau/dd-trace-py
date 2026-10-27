@@ -565,6 +565,23 @@ def test_modulo_replay_preserves_python_output(template, value):
     assert mod.do_modulo(template, (value,)) == template % (value,)
 
 
+@pytest.mark.parametrize("mapping", [{1: "x"}, {"value": [1, 2]}, {"value": b"x"}])
+@pytest.mark.parametrize("template", ["data: %s", "%%(unused)s data: %s", "100%% done", "no placeholders"])
+def test_positional_dict_formatting_preserves_template_taint(mapping, template):
+    template = taint_pyobject(template, "template", template, OriginType.PARAMETER)
+    result = mod.do_modulo(template, mapping)
+    assert result == template % mapping
+    assert get_tainted_ranges(result)
+
+
+@pytest.mark.parametrize("unused", [b"\xff\x00", "\udcff"])
+def test_mapping_formatting_unused_non_utf8_value_does_not_drop_taint(unused):
+    value = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)
+    result = mod.do_modulo("%(value)s", {"value": value, "unused": unused})
+    assert result == "tainted"
+    assert len(get_tainted_ranges(result)) == 1
+
+
 @pytest.mark.parametrize("extra", [{"unused": object()}, {object(): "unused"}])
 def test_mapping_formatting_unused_custom_entry_does_not_drop_taint(extra):
     value = taint_pyobject("tainted", "parameter", "tainted", OriginType.PARAMETER)

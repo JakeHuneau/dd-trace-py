@@ -52,6 +52,56 @@ def test_format_map_does_not_evaluate_unused_custom_mapping_values():
     assert mapping.calls == ["value"]
 
 
+def test_format_map_does_not_evaluate_unused_lazy_value():
+    class Lazy:
+        hits = 0
+
+        @property
+        def __class__(self):
+            self.hits += 1
+            return Lazy
+
+    lazy = Lazy()
+    value = _to_tainted_string_with_origin(":+-<parameter>input<parameter>-+:")
+    result = mod.do_format_map("{value}", {"value": value, "unused": lazy})
+    assert result == "input"
+    assert as_formatted_evidence(result, tag_mapping_function=None) == ":+-<parameter>input<parameter>-+:"
+    assert lazy.hits == 0
+
+
+@pytest.mark.parametrize("unused", [b"\xff\x00", "\udcff"])
+def test_format_map_unused_non_utf8_value_does_not_drop_taint(unused):
+    value = _to_tainted_string_with_origin(":+-<parameter>input<parameter>-+:")
+    result = mod.do_format_map("{value}", {"value": value, "unused": unused})
+    assert result == "input"
+    assert as_formatted_evidence(result, tag_mapping_function=None) == ":+-<parameter>input<parameter>-+:"
+
+
+def test_format_map_does_not_repeat_custom_value_conversion():
+    class Value:
+        calls = 0
+
+        def __format__(self, spec):
+            self.calls += 1
+            return str(self.calls)
+
+    custom = Value()
+    value = _to_tainted_string_with_origin(":+-<parameter>input<parameter>-+:")
+    assert mod.do_format_map("{value}/{custom}", {"value": value, "custom": custom}) == "input/1"
+    assert custom.calls == 1
+
+
+def test_format_map_does_not_enumerate_dict_subclass():
+    class CustomDict(dict):
+        def items(self):
+            pytest.fail("items() should not be called")
+
+        def values(self):
+            pytest.fail("values() should not be called")
+
+    assert mod.do_format_map("{value}", CustomDict(value="input")) == "input"
+
+
 class TestOperatorFormatMapReplacement(BaseReplacement):
     def _assert_format_map_result(
         self,

@@ -74,8 +74,27 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
 #if PY_VERSION_HEX >= 0x030F0000
         mapping_parameters = mapping_parameters || PyFrozenDict_CheckExact(candidate_tuple);
 #endif
+        const bool dict_operand = mapping_parameters;
+        optional<string> mapping_format;
+        if (mapping_parameters) {
+            mapping_format = AnyTextObjectToString(candidate_text);
+            const auto& format = *mapping_format;
+            mapping_parameters = false;
+            for (size_t index = 0; index + 1 < format.size(); ++index) {
+                if (format[index] == '%') {
+                    if (format[index + 1] == '(') {
+                        mapping_parameters = true;
+                        break;
+                    }
+                    if (format[index + 1] == '%') {
+                        ++index;
+                    }
+                }
+            }
+        }
         py::object mapping_items;
         py::tuple parameters;
+        py::tuple range_parameters;
         if (mapping_parameters) {
             // Snapshot strong references before formatting can allocate or call Python.
             auto items = py::reinterpret_steal<py::list>(PyDict_Items(candidate_tuple));
@@ -84,6 +103,7 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
             }
             py::list safe_items;
             py::list values;
+            py::list text_values;
             for (const auto item : items) {
                 const auto pair = py::reinterpret_borrow<py::tuple>(item);
                 const auto key = pair[0];
@@ -91,34 +111,44 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
                 // Classify before range discovery: even isinstance checks on custom
                 // values can invoke __class__ and evaluate unused lazy proxies.
                 const bool safe_key = PyUnicode_CheckExact(key.ptr()) || PyBytes_CheckExact(key.ptr());
-                const bool safe_value = is_text(value.ptr()) || PyLong_CheckExact(value.ptr()) ||
+                const bool safe_value = PyUnicode_CheckExact(value.ptr()) || PyBytes_CheckExact(value.ptr()) ||
+                                        PyByteArray_CheckExact(value.ptr()) || PyLong_CheckExact(value.ptr()) ||
                                         PyFloat_CheckExact(value.ptr()) || PyBool_Check(value.ptr()) ||
                                         value.ptr() == Py_None;
                 if (safe_key && safe_value) {
                     safe_items.append(pair);
                     values.append(value);
+                    if (is_text(value.ptr())) {
+                        text_values.append(value);
+                    }
                 }
             }
             mapping_items = std::move(safe_items);
             parameters = py::tuple(values);
+            range_parameters = py::tuple(text_values);
         } else {
             parameters =
               py::isinstance<py::tuple>(py_candidate_tuple) ? py_candidate_tuple : py::make_tuple(py_candidate_tuple);
+            range_parameters = parameters;
         }
 
-        auto [ranges_orig, candidate_text_ranges] = are_all_text_all_ranges(candidate_text, parameters, tx_map);
+        auto [ranges_orig, candidate_text_ranges] = are_all_text_all_ranges(candidate_text, range_parameters, tx_map);
 
         if (ranges_orig.empty()) {
             return return_candidate_result();
         }
 
-        auto std_candidate_text = py_candidate_text.cast<string>();
+        auto std_candidate_text = mapping_format ? std::move(*mapping_format) : py_candidate_text.cast<string>();
         auto fmttext = as_formatted_evidence(std_candidate_text, candidate_text_ranges, TagMappingMode::Mapper);
         py::list list_formatted_parameters;
 
         for (const py::handle& param_handle : parameters) {
             if (is_text(param_handle.ptr())) {
                 auto [ranges, ranges_error] = get_ranges(param_handle.ptr(), tx_map);
+                if (mapping_parameters && ranges.empty()) {
+                    list_formatted_parameters.append(param_handle);
+                    continue;
+                }
                 string n_parameter =
                   as_formatted_evidence(AnyTextObjectToString(param_handle), ranges, TagMappingMode::Mapper, nullopt);
                 list_formatted_parameters.append(StringToPyObject(n_parameter, py_str_type));
@@ -139,6 +169,8 @@ api_modulo_aspect(PyObject* self, PyObject* const* args, const Py_ssize_t nargs)
                 ++index;
             }
             formatted_parameters = std::move(formatted_mapping);
+        } else if (dict_operand) {
+            formatted_parameters = py_candidate_tuple;
         } else {
             formatted_parameters = py::tuple(list_formatted_parameters);
         }

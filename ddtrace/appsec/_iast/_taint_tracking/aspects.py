@@ -54,6 +54,7 @@ from ddtrace.appsec._iast_context import is_iast_request_enabled
 
 TEXT_TYPES = Union[str, bytes, bytearray]
 _DICT_TYPES = (dict, getattr(builtins, "frozendict", dict))
+_FORMAT_MAP_VALUE_TYPES = (str, bytes, bytearray, int, float, bool, type(None))
 
 _extend_aspect = aspects.extend_aspect
 _join_aspect = aspects.join_aspect
@@ -491,8 +492,11 @@ def format_map_aspect(orig_function: Optional[Callable], flag_added_args: int, *
 
     try:
         mapping = parse_params(0, "mapping", None, *args, **kwargs)
-        if not isinstance(mapping, _DICT_TYPES):
+        if type(mapping) not in _DICT_TYPES:
             return result
+        mapping = {
+            key: value for key, value in mapping.items() if type(key) is str and type(value) in _FORMAT_MAP_VALUE_TYPES
+        }
         mapping_tuple = tuple(mapping.values())
         ranges_orig, candidate_text_ranges = are_all_text_all_ranges(
             candidate_text,
@@ -501,21 +505,24 @@ def format_map_aspect(orig_function: Optional[Callable], flag_added_args: int, *
         if not ranges_orig:
             return result
 
-        aspect_result = _convert_escaped_text_to_tainted_text(
-            as_formatted_evidence(
-                candidate_text, candidate_text_ranges, tag_mapping_function=TagMappingMode.Mapper
-            ).format_map(
-                {
-                    key: (
-                        as_formatted_evidence(value, tag_mapping_function=TagMappingMode.Mapper)
-                        if isinstance(value, IAST.TEXT_TYPES)
-                        else value
-                    )
-                    for key, value in mapping.items()
-                }
-            ),
-            ranges_orig=ranges_orig,
+        escaped_template = as_formatted_evidence(
+            candidate_text, candidate_text_ranges, tag_mapping_function=TagMappingMode.Mapper
         )
+        escaped_mapping = {
+            key: (
+                as_formatted_evidence(value, tag_mapping_function=TagMappingMode.Mapper)
+                if type(value) in IAST.TEXT_TYPES and is_pyobject_tainted(value)
+                else value
+            )
+            for key, value in mapping.items()
+        }
+        try:
+            escaped_result = escaped_template.format_map(escaped_mapping)
+        except KeyError:
+            # A custom value omitted from replay was referenced. Keep the original result
+            # without repeating its conversion or reporting an instrumentation error.
+            return result
+        aspect_result = _convert_escaped_text_to_tainted_text(escaped_result, ranges_orig=ranges_orig)
         if aspect_result != result:
             return result
         return aspect_result
